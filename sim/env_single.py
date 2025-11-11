@@ -2,6 +2,7 @@ import os
 import time
 import pybullet as p
 import pybullet_data
+import numpy as np
 
 # --- Fix Windows text cutoff / DPI scaling issue ---
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"
@@ -53,14 +54,17 @@ hover_force = mass * 9.81
 print(f"Mass = {mass:.3f} kg → Hover force = {hover_force:.3f} N")
 
 target_height = 1.5
-kp = 1.0  # proportional gain
+kp = 15.0  # proportional gain
+log_data = []
+step = 0
 
-# --- Simulation loop ---
-for _ in range(5000):
+# --- Simulation loop of 20 seconds---
+for step in range(1000):
     pos, _ = p.getBasePositionAndOrientation(drone)
     err = target_height - pos[2]
     thrust = hover_force + kp * err
-
+    print("Error", err)
+    print("Control output (thrust):",thrust,"N")
     # Apply force in body frame (vertical thrust)
     p.applyExternalForce(
         drone, -1,
@@ -68,9 +72,20 @@ for _ in range(5000):
         [0, 0, 0],
         p.LINK_FRAME
     )
-
     p.stepSimulation()
-    time.sleep(1/240)
+    # Log: time (s), height (m), error (m), thrust (N)
+    log_data.append([step / 240, pos[2], err, thrust])
+    time.sleep(1/240) #time step
+
+
+# --- Save data to file ---
+log_data = np.array(log_data)
+np.savetxt("altitude_log.csv", log_data,
+           delimiter=",",
+           header="time_s,height_m,error_m,thrust_N",
+           comments="")
 
 # --- Cleanly close connection after run ---
 p.disconnect()
+
+print("Simulation complete. Logged data saved to altitude_log.csv")
