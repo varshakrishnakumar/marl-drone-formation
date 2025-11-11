@@ -3,6 +3,8 @@ import time
 import pybullet as p
 import pybullet_data
 import numpy as np
+import pygetwindow as gw
+import pyautogui
 
 # --- Fix Windows text cutoff / DPI scaling issue ---
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"
@@ -12,6 +14,13 @@ if p.isConnected():
     p.disconnect()
 
 p.connect(p.GUI)
+time.sleep(1)  # small delay to let window appear
+# Find and bring PyBullet window to front
+for win in gw.getWindowsWithTitle('PyBullet'):
+    win.activate()
+    win.restore()
+    pyautogui.click(win.left + 50, win.top + 50)  # give it focus
+    break
 p.setAdditionalSearchPath(pybullet_data.getDataPath())
 p.resetSimulation()
 p.setGravity(0, 0, -9.81)
@@ -33,7 +42,7 @@ plane = p.loadURDF("plane.urdf")
 
 drone = p.loadURDF(
     r"C:\Users\ronak\anaconda3\envs\pybullet_env\bullet3-master\data\Quadrotor\quadrotor.urdf",
-    [0, 0, 1]
+    [0, 0, 1.3]
 )
 print("Drone ID:", drone)
 
@@ -45,7 +54,7 @@ obstacle = p.createMultiBody(
     baseMass=0,
     baseCollisionShapeIndex=colCube,
     baseVisualShapeIndex=visCube,
-    basePosition=[1, 0, 0.2]
+    basePosition=[0, 0, 0]
 )
 
 # --- Hover control setup ---
@@ -65,17 +74,36 @@ for step in range(1000):
     thrust = hover_force + kp * err
     print("Error", err)
     print("Control output (thrust):",thrust,"N")
+    
     # Apply force in body frame (vertical thrust)
     p.applyExternalForce(
         drone, -1,
-        [0, 0, thrust],
+        [0, 0, thrust ],
         [0, 0, 0],
         p.LINK_FRAME
     )
+    
     p.stepSimulation()
+    
+    #if collision is detected, print and end simulation 
+    contacts = p.getContactPoints(drone, obstacle)
+    if contacts:
+        print(f"Collision! {len(contacts)} points, penetration {contacts[0][8]:.4f} m")
+        print(contacts)
+        p.disconnect()
+    
+    
     # Log: time (s), height (m), error (m), thrust (N)
     log_data.append([step / 240, pos[2], err, thrust])
     time.sleep(1/240) #time step
+    
+    # Apply force in body frame (horizontal thrust)
+    #p.applyExternalForce(
+        #drone, -1,
+        #[0, 4, 0],
+        #[0, 0, 0],
+        #p.LINK_FRAME
+    #)
 
 
 # --- Save data to file ---
