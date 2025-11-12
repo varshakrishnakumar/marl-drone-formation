@@ -4,6 +4,8 @@ import numpy as np
 import pybullet as p
 import pybullet_data
 import os, time
+import pandas as pd
+
 
 class SingleDroneEnv(gym.Env):
     metadata = {"render.modes": ["human"]}
@@ -15,6 +17,8 @@ class SingleDroneEnv(gym.Env):
         self.max_steps = 1000
         self.target_z = 1.0
         self.kp = 10.0
+        # log data!!
+        self.log_data = []
 
         # Connect to PyBullet
         self.cid = p.connect(p.GUI if gui else p.DIRECT)
@@ -37,11 +41,15 @@ class SingleDroneEnv(gym.Env):
         self.mass = p.getDynamicsInfo(self.drone, -1)[0]
         self.hover_force = self.mass * 9.81
 
-    def reset(self):
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
         p.resetBasePositionAndOrientation(self.drone, [0, 0, 0.5], [0, 0, 0, 1])
         p.resetBaseVelocity(self.drone, [0, 0, 0], [0, 0, 0])
         self.step_count = 0
-        return self._get_obs()
+        init_z = 0.5 + np.random.uniform(-0.1, 0.1)
+        p.resetBasePositionAndOrientation(self.drone, [0, 0, init_z], [0, 0, 0, 1])
+        return self._get_obs(), {}
+
 
     def _get_obs(self):
         pos, vel = p.getBasePositionAndOrientation(self.drone)[0], p.getBaseVelocity(self.drone)[0]
@@ -50,26 +58,68 @@ class SingleDroneEnv(gym.Env):
         return np.array([z, z_dot, err], dtype=np.float32)
 
     def step(self, action):
-        thrust_ratio = np.clip(action[0], 0, 1)
-        thrust = thrust_ratio * 2 * self.hover_force  # allow up to 2x hover
+        """Apply an action, advance physics, and compute reward."""
 
-        p.applyExternalForce(self.drone, -1, [0, 0, thrust], [0, 0, 0], p.LINK_FRAME)
+        # --- Apply action ---
+        thrust_ratio = float(np.clip(action[0], 0, 1))
+        thrust = thrust_ratio * 2 * self.hover_force   # scale thrust up to 2× hover
+
+        # Apply force upward in body frame
+        p.applyExternalForce(
+            self.drone, -1,
+            [0, 0, thrust],
+            [0, 0, 0],
+            p.LINK_FRAME
+        )
+
+        # Step physics
         p.stepSimulation()
         if self.gui:
             time.sleep(self.time_step)
 
+        # --- Observe new state ---
         obs = self._get_obs()
-        z = obs[0]
-        done = z < 0.1 or z > 3.0 or self.step_count >= self.max_steps
-        reward = -abs(obs[2])  # penalize height error
+        z, z_dot, err = obs
+
+        # --- Compute reward ---
+        # Base reward: closer to target height = higher reward
+        reward = 1.0 - abs(err)
+
+        # Penalty for vertical velocity (instability)
+        reward -= 0.1 * abs(z_dot)
+
+        # Clip to reasonable range
+        reward = float(np.clip(reward, -1, 1))
+
+        # --- Termination conditions ---
+        terminated = z < 0.1 or z > 3.0      # crashed or flew away
+        truncated = self.step_count >= self.max_steps
         self.step_count += 1
-        return obs, reward, done, {}
+
+        # --- Logging for analysis ---
+        self.log_data.append({
+            "step": self.step_count,
+            "z": z,
+            "error": err,
+            "reward": reward
+        })
+
+        # --- Return Gymnasium-style output ---
+        info = {}
+        return obs, reward, terminated, truncated, info
+
 
     def render(self, mode="human"):
         pass  # GUI handled automatically
 
     def close(self):
         p.disconnect(self.cid)
+    
+    def save_log(self, filename="hover_log.csv"):
+        df = pd.DataFrame(self.log_data)
+        df.to_csv(filename, index=False)
+        print(f"[INFO] Log saved to {filename}")
+
 
 if __name__ == "__main__":
     env = SingleDroneEnv(gui=True)
