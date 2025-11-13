@@ -1,7 +1,7 @@
 # Multi-Agent Reinforcement Learning for Drone Formation Control
 
-This repository contains simulation and reinforcement learning code for **ASTE 599: Extreme Environment Robotic Autonomy (Fall 2025)**.  
-We train multi-agent controllers for drone formation flight and obstacle avoidance using **PyBullet** and **Reinforcement Learning (PPO/SAC)** frameworks.
+This repository contains simulation and reinforcement learning code for ASTE 599: Extreme Environment Robotic Autonomy (Fall 2025).  
+We train multi-agent controllers for drone formation flight and obstacle avoidance using PyBullet and Reinforcement Learning (PPO/SAC) frameworks.
 
 ---
 
