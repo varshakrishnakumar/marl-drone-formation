@@ -119,6 +119,7 @@ class MultiDroneEnv(gym.Env):
         self.obstacle_ids = []
         self.dynamic_obstacle_id = None
         self.dynamic_phase = 0.0
+        
 
     # ------------------------------------------------------------
     # Leader trajectory (smooth sine-wave trajectory)
@@ -155,6 +156,59 @@ class MultiDroneEnv(gym.Env):
         self.obstacle_ids = self._spawn_static_obstacles()
         self.dynamic_obstacle_id = self._spawn_dynamic_obstacle()
         self.dynamic_phase = 0.0
+        
+        # ---- Modify difficulty: randomize obstacle sizes ----
+        scale = np.random.uniform(0.01, 50.0)  # 50% to 200%
+        
+        for obs_id in self.obstacle_ids:
+            p.changeVisualShape(obs_id, -1, meshScale=[scale, scale, scale])
+            p.changeCollisionShape(obs_id, -1, collisionFramePosition=[0,0,0], meshScale=[scale, scale, scale])
+
+        
+        # --------------------------------------------
+        # Apply randomized initial conditions
+        # --------------------------------------------
+        if options is not None:
+            # --- Drone position jitter ---
+            if "pos_jitter" in options:
+                for i in range(self.num_drones):
+                    base_pos, base_ori = p.getBasePositionAndOrientation(self.drone_ids[i])
+                    jitter = np.array(options["pos_jitter"][i], dtype=np.float32)
+                    new_pos = np.array(base_pos) + jitter
+                    p.resetBasePositionAndOrientation(self.drone_ids[i], new_pos, base_ori)
+        
+            # --- Drone yaw jitter ---
+            if "yaw_jitter" in options:
+                for i in range(self.num_drones):
+                    _, base_ori = p.getBasePositionAndOrientation(self.drone_ids[i])
+                    yaw = float(options["yaw_jitter"][i])
+                    new_ori = p.getQuaternionFromEuler([0, 0, yaw])
+                    pos, _ = p.getBasePositionAndOrientation(self.drone_ids[i])
+                    p.resetBasePositionAndOrientation(self.drone_ids[i], pos, new_ori)
+        
+            # --- Drone initial velocity jitter ---
+            if "vel_jitter" in options:
+                for i in range(self.num_drones):
+                    vel = np.array(options["vel_jitter"][i], dtype=np.float32)
+                    p.resetBaseVelocity(self.drone_ids[i], vel.tolist(), [0,0,0])
+        
+            # --- Static obstacle jitter ---
+            if "obstacle_jitter" in options:
+                jitter = np.array(options["obstacle_jitter"], dtype=np.float32)
+                for oid in self.obstacle_ids:
+                    pos, ori = p.getBasePositionAndOrientation(oid)
+                    new_pos = np.array(pos) + jitter
+                    p.resetBasePositionAndOrientation(oid, new_pos.tolist(), ori)
+        
+            # --- Dynamic obstacle jitter ---
+            if "dynamic_jitter" in options:
+                pos, ori = p.getBasePositionAndOrientation(self.dynamic_obstacle_id)
+                new_pos = np.array(pos) + np.array(options["dynamic_jitter"], dtype=np.float32)
+                p.resetBasePositionAndOrientation(self.dynamic_obstacle_id, new_pos.tolist(), ori)
+
+
+
+
 
         self.leader_traj_t = 0.0
 

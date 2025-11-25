@@ -1,6 +1,20 @@
+import os
+TARGET_DIR = r"C:\Users\ronak\anaconda3\envs\marl\marl-drone-formation"
+if os.getcwd() != TARGET_DIR:
+    os.chdir(TARGET_DIR)
+
+
 from sim.envs.multi_drone_quad_env import MultiDroneQuadEnv
 from sim.controllers.baseline_pid import FormationPIDController
 import numpy as np
+
+
+
+
+import pybullet as p
+while p.isConnected():
+    p.disconnect()
+
 
 def run_baseline(num_episodes=5, gui=True):
     env = MultiDroneQuadEnv(num_drones=5, gui=gui)

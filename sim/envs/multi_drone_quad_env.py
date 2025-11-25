@@ -34,7 +34,14 @@ class MultiDroneQuadEnv(gym.Env):
 
         self.num_drones = num_drones
         self.gui = gui
-        self.physics_client = None
+        if p.isConnected():
+            # Reuse existing physics server (likely a GUI)
+            self.physics_client = p.getConnectionInfo()['clientIndex']
+        else:
+            # Only open GUI if requested, otherwise DIRECT
+            self.physics_client = p.connect(p.GUI if self.gui else p.DIRECT)
+
+        p.setRealTimeSimulation(0)
         self.collision_happened = False
         self.last_metrics = {}
 
@@ -178,23 +185,64 @@ class MultiDroneQuadEnv(gym.Env):
         self.collision_happened = False
         self.step_count = 0
 
-        # Reset physics
-        if self.physics_client is not None:
-            p.disconnect(self.physics_client)
-
-        self.physics_client = p.connect(p.GUI if self.gui else p.DIRECT)
-        p.setRealTimeSimulation(0)
+        # Only reset simulation, not reconnect physics server
+        p.resetSimulation()
         p.setGravity(0, 0, -9.81)
         p.setTimeStep(self.time_step)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
-        p.resetSimulation()
         p.loadURDF("plane.urdf")
+
 
         # Spawn drones + obstacles
         self.drone_ids = self._spawn_drones(self.num_drones)
         self.obstacle_ids = self._spawn_static_obstacles()
         self.dynamic_obstacle_id = self._spawn_dynamic_obstacle()
         self.dynamic_phase = 0.0
+        
+
+        
+        # --------------------------------------------
+        # Apply randomized initial conditions
+        # --------------------------------------------
+        if options is not None:
+            # --- Drone position jitter ---
+            if "pos_jitter" in options:
+                for i in range(self.num_drones):
+                    base_pos, base_ori = p.getBasePositionAndOrientation(self.drone_ids[i])
+                    jitter = np.array(options["pos_jitter"][i], dtype=np.float32)
+                    new_pos = np.array(base_pos) + jitter
+                    p.resetBasePositionAndOrientation(self.drone_ids[i], new_pos, base_ori)
+        
+            # --- Drone yaw jitter ---
+            if "yaw_jitter" in options:
+                for i in range(self.num_drones):
+                    _, base_ori = p.getBasePositionAndOrientation(self.drone_ids[i])
+                    yaw = float(options["yaw_jitter"][i])
+                    new_ori = p.getQuaternionFromEuler([0, 0, yaw])
+                    pos, _ = p.getBasePositionAndOrientation(self.drone_ids[i])
+                    p.resetBasePositionAndOrientation(self.drone_ids[i], pos, new_ori)
+        
+            # --- Drone initial velocity jitter ---
+            if "vel_jitter" in options:
+                for i in range(self.num_drones):
+                    vel = np.array(options["vel_jitter"][i], dtype=np.float32)
+                    p.resetBaseVelocity(self.drone_ids[i], vel.tolist(), [0,0,0])
+        
+            # --- Static obstacle jitter ---
+            if "obstacle_jitter" in options:
+                jitter = np.array(options["obstacle_jitter"], dtype=np.float32)
+                for oid in self.obstacle_ids:
+                    pos, ori = p.getBasePositionAndOrientation(oid)
+                    new_pos = np.array(pos) + jitter
+                    p.resetBasePositionAndOrientation(oid, new_pos.tolist(), ori)
+        
+            # --- Dynamic obstacle jitter ---
+            if "dynamic_jitter" in options:
+                pos, ori = p.getBasePositionAndOrientation(self.dynamic_obstacle_id)
+                new_pos = np.array(pos) + np.array(options["dynamic_jitter"], dtype=np.float32)
+                p.resetBasePositionAndOrientation(self.dynamic_obstacle_id, new_pos.tolist(), ori)
+
+
 
         # Reset leader trajectory time
         self.leader_traj_t = 0.0
@@ -329,17 +377,23 @@ class MultiDroneQuadEnv(gym.Env):
 
     def _spawn_static_obstacles(self):
         obs_ids = []
+    
+        # Random scale for obstacles for this episode
+        scale = np.random.uniform(0.5, 2.0)
+    
         positions = [
             [1.0, 0.0, 0.25],
             [2.0, -1.0, 0.25],
             [2.0,  1.0, 0.25],
             [3.0,  0.0, 0.25],
         ]
+    
         for pos in positions:
             box_id = p.loadURDF(
                 os.path.join(ASSETS_DIR, "cube_small.urdf"),
                 basePosition=pos,
                 baseOrientation=[0, 0, 0, 1],
+                globalScaling=scale,      # <---- scale applied here
                 useFixedBase=True,
             )
             p.changeDynamics(
@@ -351,14 +405,39 @@ class MultiDroneQuadEnv(gym.Env):
                 spinningFriction=0.1,
             )
             obs_ids.append(box_id)
+    
+        # store scale for logging/MC analysis
+        self.last_obstacle_scale = scale
+    
         return obs_ids
 
+
     def _spawn_dynamic_obstacle(self):
+        # -----------------------------
+        # Episode randomization knobs
+        # -----------------------------
+        scale = np.random.uniform(0.5, 1.8)        # size difficulty
+        x0    = np.random.uniform(1.0, 2.5)        # initial X placement
+        y0    = np.random.uniform(-0.5, 0.5)       # initial Y
+        z0    = np.random.uniform(0.25, 0.6)       # initial Z
+        amp   = np.random.uniform(0.2, 1.0)        # motion amplitude
+        speed = np.random.uniform(0.02, 0.08)      # oscillation speed
+        phase = np.random.uniform(0, 2*np.pi)      # initial oscillation phase
+    
+        # Store parameters for motion + logging
+        self.dynamic_amp = amp
+        self.dynamic_speed = speed
+        self.dynamic_phase = phase
+        self.dynamic_scale = scale
+    
         sphere_id = p.loadURDF(
             os.path.join(ASSETS_DIR, "sphere_small.urdf"),
-            basePosition=[1.5, 0.0, 0.3],
+            basePosition=[x0, y0, z0],
+            baseOrientation=[0, 0, 0, 1],
+            globalScaling=scale,                # <---- episode scaling applied here
             useFixedBase=False,
         )
+    
         p.changeDynamics(
             sphere_id,
             -1,
@@ -367,48 +446,96 @@ class MultiDroneQuadEnv(gym.Env):
             linearDamping=0.1,
             angularDamping=0.1,
         )
+    
         return sphere_id
 
+
     def _update_dynamic_obstacle(self):
-        # Target chosen in reset()
+        """
+        Dynamic obstacle performs:
+          - Chasing behavior toward selected drone
+          - Sinusoidal oscillation in Y with randomized amplitude/speed/phase
+          - Difficulty ramp as episode progresses
+          - All motion uses obstacle parameters set in _spawn_dynamic_obstacle()
+        """
+    
+        # -----------------------------------
+        # 1. Get random oscillation parameters
+        # -----------------------------------
+        self.dynamic_phase += self.dynamic_speed
+        osc_y = self.dynamic_amp * np.sin(self.dynamic_phase)
+    
+        # Current obstacle position
+        obs_pos, _ = p.getBasePositionAndOrientation(self.dynamic_obstacle_id)
+        obs_pos = np.array(obs_pos, dtype=np.float32)
+    
+        x0 = obs_pos[0]   # keep X from spawn
+        z0 = obs_pos[2]   # keep Z from spawn
+        y0 = osc_y        # sinusoidal motion added in Y
+    
+        # -----------------------------------
+        # 2. Drone-chasing target position
+        # -----------------------------------
         target_pos, _ = p.getBasePositionAndOrientation(
             self.drone_ids[self.chase_target_drone]
         )
         target_pos = np.array(target_pos, dtype=np.float32)
-
-        obs_pos, _ = p.getBasePositionAndOrientation(self.dynamic_obstacle_id)
-        obs_pos = np.array(obs_pos, dtype=np.float32)
-
-        direction = target_pos - obs_pos
-        dist = np.linalg.norm(direction)
-        if dist < 1e-6:
-            direction[:] = 0.0
+    
+        # -----------------------------------
+        # 3. Direction toward target (X/Z only)
+        #    We let oscillation control Y, and chasing control X/Z.
+        # -----------------------------------
+        chase_dir = target_pos - obs_pos
+        chase_dir[1] = 0.0    # XZ chase only, Y handled by oscillation
+    
+        norm = np.linalg.norm(chase_dir)
+        if norm > 1e-6:
+            chase_dir = chase_dir / norm
         else:
-            direction /= dist
-
-        # Difficulty ramp
+            chase_dir[:] = 0.0
+    
+        # -----------------------------------
+        # 4. Difficulty ramp: aggression increases over time
+        # -----------------------------------
         difficulty = min(1.0, self.step_count / 5000.0)
-        max_speed = 0.5 + 0.5 * difficulty
-        gain = 0.2 + 0.3 * difficulty
-
-        # Current velocity
+    
+        max_speed = 0.3 + 0.7 * difficulty     # 0.3 → 1.0 m/s
+        gain = 0.15 + 0.35 * difficulty        # PD gain ramp
+    
+        # -----------------------------------
+        # 5. Velocity PD control toward target
+        # -----------------------------------
         vel, _ = p.getBaseVelocity(self.dynamic_obstacle_id)
         vel = np.array(vel, dtype=np.float32)
-
-        # Desired velocity toward target
-        vel_desired = direction * max_speed
-
-        # PD on velocity
+    
+        vel_desired = chase_dir * max_speed
+    
         accel = gain * (vel_desired - vel)
         dt = self.time_step
+    
         new_vel = vel + accel * dt
-
-        # Clamp speed
+    
+        # Clamp final speed
         speed = np.linalg.norm(new_vel)
         if speed > max_speed:
-            new_vel *= (max_speed / (speed + 1e-8))
-
+            new_vel *= max_speed / (speed + 1e-8)
+    
+        # -----------------------------------
+        # 6. Apply motion:
+        #    - New linear velocity (XZ chasing)
+        #    - Oscillation-driven Y-position
+        # -----------------------------------
+    
+        # Update velocity first
         p.resetBaseVelocity(self.dynamic_obstacle_id, new_vel.tolist(), [0, 0, 0])
+    
+        # Then override Y position with oscillation
+        p.resetBasePositionAndOrientation(
+            self.dynamic_obstacle_id,
+            [obs_pos[0], y0, obs_pos[2]],
+            [0, 0, 0, 1],
+        )
+
 
 
     def _get_all_obs(self) -> np.ndarray:
