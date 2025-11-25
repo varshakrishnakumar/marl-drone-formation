@@ -3,62 +3,79 @@ import argparse
 import datetime
 
 import gymnasium as gym
+import torch
+
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.vec_env.vec_normalize import VecNormalize
 from stable_baselines3.common.callbacks import CheckpointCallback
 
-from sim.envs.multi_drone_env import MultiDroneEnv
+from sim.envs.multi_drone_quad_env import MultiDroneQuadEnv
+from sim.envs.callbacks import CustomMetricsCallback
 
 
-def make_env(num_drones=5, gui=False):
-    """
-    Returns a function that creates a MultiDroneEnv.
-    Used by DummyVecEnv to construct parallel instances.
-    """
+# -----------------------------------------------------------------------------
+# Environment factory
+# -----------------------------------------------------------------------------
+def make_env(num_drones=5, gui=False, seed_offset=0):
     def _init():
-        return MultiDroneEnv(num_drones=num_drones, gui=gui)
+        env = MultiDroneQuadEnv(num_drones=num_drones, gui=gui)
+        env.reset(seed=seed_offset)
+        return env
     return _init
 
 
+# -----------------------------------------------------------------------------
+# Argument parsing
+# -----------------------------------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Optimized training script for MultiDroneEnv."
+        description="Training script for MultiDroneQuadEnv (Multi-Drone Formation + Obstacle Avoidance)"
     )
 
-    parser.add_argument(
-        "--timesteps",
-        type=int,
-        default=300_000,
-        help="Total PPO training timesteps."
-    )
+    parser.add_argument("--timesteps", type=int, default=1_000_000,
+                        help="Total PPO training timesteps.")
 
-    parser.add_argument(
-        "--num-drones",
-        type=int,
-        default=5,
-        help="Number of drones."
-    )
+    parser.add_argument("--num-drones", type=int, default=5,
+                        help="Number of drones.")
 
-    parser.add_argument(
-        "--n-envs",
-        type=int,
-        default=1,
-        help="Number of parallel vector environments. Use 1 for macOS speed."
-    )
+    parser.add_argument("--n-envs", type=int, default=4,
+                        help="Number of parallel environments. "
+                             "Use 1 on macOS; use 4-16 on Linux for speed.")
 
-    parser.add_argument(
-        "--run-name",
-        type=str,
-        default=None,
-        help="Optional name for logs/model folders."
-    )
+    parser.add_argument("--run-name", type=str, default=None,
+                        help="Optional name for logging/model directories.")
+
+    parser.add_argument("--normalize", action="store_true",
+                        help="Use VecNormalize (recommended for PPO).")
+    parser.add_argument("--load-model", type=str, default=None,
+                    help="Path to a previous PPO model to continue training.")
+
+    parser.add_argument("--hyper", type=str, default=None,
+                        help="JSON string with hyperparameter overrides.")
+
 
     return parser.parse_args()
 
 
+# -----------------------------------------------------------------------------
+# Main training logic
+# -----------------------------------------------------------------------------
 def main():
     args = parse_args()
+    
+    import json
 
+# Apply hyperparameter overrides
+    hyperparams = {}
+    if args.hyper:
+        hyperparams = json.loads(args.hyper)
+        print("Applying hyperparameter overrides:", hyperparams)
+
+
+    # -------------------------------------------------------------------------
+    # Paths
+    # -------------------------------------------------------------------------
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = args.run_name or f"marl_run_{timestamp}"
 
@@ -67,53 +84,99 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(models_dir, exist_ok=True)
 
+    # -------------------------------------------------------------------------
+    # Build vectorized training environment
+    # -------------------------------------------------------------------------
+    print(f"\nCreating {args.n_envs} training environments...")
 
-    env_fns = [make_env(num_drones=args.num_drones, gui=False)
-               for _ in range(args.n_envs)]
-    train_env = DummyVecEnv(env_fns)
+    if args.n_envs == 1:
+        env_fns = [make_env(args.num_drones, gui=False)]
+        vec_env = DummyVecEnv(env_fns)
+    else:
+        env_fns = [make_env(args.num_drones, gui=False, seed_offset=i)
+                   for i in range(args.n_envs)]
+        vec_env = SubprocVecEnv(env_fns)
+
+    # Optional normalization
+    if args.normalize:
+        vec_env = VecNormalize(
+            vec_env,
+            norm_obs=True,
+            norm_reward=True,
+            clip_obs=10.0,
+            clip_reward=10.0
+        )
+        print("Using VecNormalize.")
+
+    # -------------------------------------------------------------------------
+    # PPO Model (tuned for drone dynamics)
+    # -------------------------------------------------------------------------
+    print("Initializing PPO model...\n")
 
     model = PPO(
         policy="MlpPolicy",
-        env=train_env,
-        learning_rate=3e-4,
-        n_steps=1024,          # smaller for stability on macOS
-        batch_size=64,
+        env=vec_env,
+        learning_rate=hyperparams.get("learning_rate", 2.5e-4),
+        n_steps=hyperparams.get("n_steps", 2048 // args.n_envs),
+        gamma=hyperparams.get("gamma", 0.995),
+        batch_size=128,
         n_epochs=10,
-        gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
-        ent_coef=0.01,
-        verbose=1,
+        ent_coef=0.005,
+        vf_coef=0.5,
+        max_grad_norm=0.5,
         tensorboard_log=log_dir,
+        verbose=1,
+        device="cuda" if torch.cuda.is_available() else "cpu"
     )
 
+
+    # -------------------------------------------------------------------------
+    # Callbacks
+    # -------------------------------------------------------------------------
     checkpoint_callback = CheckpointCallback(
-        save_freq=50_000,
+        save_freq=100_000,
         save_path=models_dir,
-        name_prefix="ppo_marl_checkpoint",
+        name_prefix="checkpoint",
         save_replay_buffer=False,
-        save_vecnormalize=False,
+        save_vecnormalize=True,
     )
 
-    # ----------------------------------------------------------------------
-    # Train
-    # ----------------------------------------------------------------------
-    print(f"Starting optimized PPO training for {args.timesteps} timesteps...")
+    metrics_callback = CustomMetricsCallback(log_freq=200)
+
+    # -------------------------------------------------------------------------
+    # Train!
+    # -------------------------------------------------------------------------
+    print(f"Starting PPO training for {args.timesteps:,} timesteps...")
+    print(f"Logs → {log_dir}")
+    print(f"Models → {models_dir}\n")
+
     model.learn(
         total_timesteps=args.timesteps,
-        callback=[checkpoint_callback],
+        callback=[checkpoint_callback, metrics_callback],
         progress_bar=True
     )
-
-    # ----------------------------------------------------------------------
-    # Save final model
-    # ----------------------------------------------------------------------
-    final_model_path = os.path.join(models_dir, "ppo_marl_final")
-    model.save(final_model_path)
-
-    print(f"Training complete.")
-    print(f"Final model saved to: {final_model_path}")
+    
+    # Load previous model if provided (for curriculum)
+    if args.load_model:
+        print(f"Loading previous model: {args.load_model}")
+        model = PPO.load(args.load_model, env=vec_env)
 
 
+    # -------------------------------------------------------------------------
+    # Save final model + normalization stats
+    # -------------------------------------------------------------------------
+    model_path = os.path.join(models_dir, "ppo_final_model")
+    model.save(model_path)
+
+    if args.normalize:
+        vec_env.save(os.path.join(models_dir, "vec_normalize.pkl"))
+
+    print("\nTraining complete!")
+    print(f"Final model saved to: {model_path}")
+
+
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     main()

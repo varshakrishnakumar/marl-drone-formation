@@ -2,23 +2,22 @@ import argparse
 import time
 import os
 import csv
+import json
 import datetime
 import numpy as np
 
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
 
-import gymnasium as gym
 from stable_baselines3 import PPO
 import pybullet as p
 
-from sim.envs.multi_drone_env import MultiDroneEnv
+from sim.envs.multi_drone_quad_env import MultiDroneQuadEnv
 from systems.video_recorder import VideoRecorder
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Evaluate PPO MultiDroneEnv with GUI, video recording, CSV logging, and live plots."
+        description="Evaluate PPO with GUI, video recording, CSV + JSON logging, and live plots."
     )
 
     parser.add_argument("--model", type=str, required=True)
@@ -33,6 +32,9 @@ def parse_args():
     return parser.parse_args()
 
 
+# ----------------------------------------------------------------------
+# Live Plot Dashboard
+# ----------------------------------------------------------------------
 class LivePlotDashboard:
     def __init__(self, num_drones):
         self.num_drones = num_drones
@@ -44,44 +46,43 @@ class LivePlotDashboard:
         plt.tight_layout()
 
     def update(self, obs_all, desired_positions, reward):
-        """
-        obs_all shape: (num_drones, obs_dim)
-        """
         for i in range(self.num_drones):
             pos = obs_all[i][0:3]
-            desired = desired_positions[i]
-            err = np.linalg.norm(pos - desired)
+            des = desired_positions[i]
 
+            err = np.linalg.norm(pos - des)
             self.tracking_errors[i].append(err)
-            self.z_errors[i].append(abs(pos[2] - desired[2]))
+            self.z_errors[i].append(abs(pos[2] - des[2]))
 
         self.team_rewards.append(reward)
-
         self._redraw()
 
     def _redraw(self):
         for ax in self.axs:
             ax.clear()
 
-        # ----- Tracking error -----
+        # Tracking error
         for i in range(self.num_drones):
             self.axs[0].plot(self.tracking_errors[i], label=f"Drone {i}")
         self.axs[0].set_title("Tracking Error (‖pos - desired‖)")
         self.axs[0].legend()
 
-        # ----- Z error -----
+        # Height error
         for i in range(self.num_drones):
             self.axs[1].plot(self.z_errors[i], label=f"Drone {i}")
         self.axs[1].set_title("Height Error |z - z_des|")
         self.axs[1].legend()
 
-        # ----- Reward -----
+        # Reward
         self.axs[2].plot(self.team_rewards, color="purple")
         self.axs[2].set_title("Team Reward")
 
         plt.pause(0.001)
 
 
+# ----------------------------------------------------------------------
+# Main
+# ----------------------------------------------------------------------
 def main():
     args = parse_args()
 
@@ -91,15 +92,21 @@ def main():
     print(f"Loading model: {args.model}")
     model = PPO.load(args.model)
 
-    # Create evaluation environment
-    env = MultiDroneEnv(num_drones=args.num_drones, gui=args.gui)
+    # Environment
+    env = MultiDroneQuadEnv(num_drones=args.num_drones, gui=args.gui)
     obs, _ = env.reset()
 
+    # Logging filenames
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = f"eval_log_{timestamp}.csv"
-    csv_file = open(csv_path, "w", newline="")
+    json_path = f"eval_log_{timestamp}.json"
+
+    os.makedirs("logs", exist_ok=True)
+
+    csv_file = open(f"logs/{csv_path}", "w", newline="")
     csv_writer = csv.writer(csv_file)
 
+    # CSV header
     header = ["step", "team_reward", "collision"]
     for i in range(args.num_drones):
         header += [
@@ -109,33 +116,32 @@ def main():
         ]
     csv_writer.writerow(header)
 
-    print(f"CSV logging → {csv_path}")
+    print(f"CSV logging → logs/{csv_path}")
 
+    # JSON log (rich data)
+    json_log = []
+
+    # Video
     recorder = None
     if args.video:
         recorder = VideoRecorder(args.video, fps=args.video_fps)
         print(f"Recording video → {args.video}")
 
-
     dashboard = LivePlotDashboard(args.num_drones)
-
     dt = 1.0 / args.fps
+
     print("Starting evaluation...")
 
     for step in range(args.steps):
 
-        # ---- RL POLICY ----
+        # ---- RL ACTION ----
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, info = env.step(action)
 
-        # ---- Extract positions for logging ----
+        # ---- Extract data ----
         obs_all = env._get_all_obs()
-        leader_target = env.leader_trajectory(env.leader_traj_t)
 
-        desired_positions = [
-            leader_target + env.formation_offsets[i]
-            for i in range(args.num_drones)
-        ]
+        desired_positions = env.get_desired_positions()
 
         # ---- CSV LOGGING ----
         row = [step, reward, int(env.collision_happened)]
@@ -151,7 +157,17 @@ def main():
 
         csv_writer.writerow(row)
 
-        # ---- DASHBOARD ----
+        # ---- JSON LOGGING ----
+        json_log.append({
+            "step": step,
+            "team_reward": float(reward),
+            "collision": bool(env.collision_happened),
+            "positions": obs_all[:, 0:3].tolist(),
+            "desired_positions": desired_positions.tolist(),
+            "actions": action.tolist(),
+        })
+
+        # ---- LIVE DASHBOARD ----
         dashboard.update(obs_all, desired_positions, reward)
 
         # ---- VIDEO ----
@@ -181,16 +197,25 @@ def main():
 
             recorder.add_frame(rgb[:, :, :3])
 
-        # ---- Episode end ----
+        # ---- RESET IF END ----
         if terminated or truncated:
             obs, _ = env.reset()
 
         time.sleep(dt)
 
+    # ---- SAVE JSON LOG ----
+    with open(f"logs/{json_path}", "w") as jf:
+        json.dump(json_log, jf, indent=2)
+
+    print(f"JSON logging → logs/{json_path}")
+
+    # Close CSV + video
     if recorder:
         recorder.save()
-
     csv_file.close()
+
+    print("ACTION SAMPLE:", np.mean(np.abs(action)))
+
     print("Evaluation finished.")
 
 
