@@ -49,7 +49,18 @@ def parse_args():
     parser.add_argument("--normalize", action="store_true",
                         help="Use VecNormalize (recommended for PPO).")
     parser.add_argument("--load-model", type=str, default=None,
-                    help="Path to a previous PPO model to continue training.")
+                        help="Path to a previous PPO model to continue training.")
+
+    parser.add_argument("--learning-rate", type=float, default=None,
+                        help="Override the PPO learning rate (float).")
+
+    parser.add_argument(
+        "--target-kl",
+        type=float,
+        default=None,
+        help=("Optional KL threshold for early stopping. "
+              "Increase to reduce clipping or set to 0 to disable."),
+    )
 
     parser.add_argument("--hyper", type=str, default=None,
                         help="JSON string with hyperparameter overrides.")
@@ -63,10 +74,10 @@ def parse_args():
 # -----------------------------------------------------------------------------
 def main():
     args = parse_args()
-    
+
     import json
 
-# Apply hyperparameter overrides
+    # Apply hyperparameter overrides
     hyperparams = {}
     if args.hyper:
         hyperparams = json.loads(args.hyper)
@@ -113,24 +124,54 @@ def main():
     # -------------------------------------------------------------------------
     print("Initializing PPO model...\n")
 
-    model = PPO(
-        policy="MlpPolicy",
-        env=vec_env,
-        learning_rate=hyperparams.get("learning_rate", 2.5e-4),
-        n_steps=hyperparams.get("n_steps", 2048 // args.n_envs),
-        gamma=hyperparams.get("gamma", 0.995),
-        batch_size=128,
-        n_epochs=10,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.005,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-        tensorboard_log=log_dir,
-        verbose=1,
-        device="cuda" if torch.cuda.is_available() else "cpu"
+    target_kl_override = hyperparams.get("target_kl", args.target_kl)
+    if target_kl_override is not None and target_kl_override <= 0:
+        target_kl_override = None
+
+    learning_rate = hyperparams.get(
+        "learning_rate",
+        args.learning_rate if args.learning_rate is not None else 2.5e-4,
     )
 
+    logger = configure(log_dir, ["stdout", "csv", "tensorboard"])
+
+    if args.load_model:
+        print(f"Loading previous model: {args.load_model}")
+        model = PPO.load(args.load_model, env=vec_env)
+        model.set_logger(logger)
+
+        if target_kl_override is not None:
+            model.target_kl = target_kl_override
+
+        if learning_rate is not None:
+            model.learning_rate = learning_rate
+            model.lr_schedule = model._get_schedule_fn(model.learning_rate)
+
+        if "gamma" in hyperparams:
+            model.gamma = hyperparams["gamma"]
+        if "n_steps" in hyperparams:
+            model.n_steps = hyperparams["n_steps"]
+
+    else:
+        model = PPO(
+            policy="MlpPolicy",
+            env=vec_env,
+            learning_rate=learning_rate,
+            n_steps=hyperparams.get("n_steps", 2048 // args.n_envs),
+            gamma=hyperparams.get("gamma", 0.995),
+            batch_size=128,
+            n_epochs=10,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            ent_coef=0.005,
+            vf_coef=0.5,
+            max_grad_norm=0.5,
+            tensorboard_log=log_dir,
+            verbose=1,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            target_kl=target_kl_override,
+        )
+        model.set_logger(logger)
 
     # -------------------------------------------------------------------------
     # Callbacks
@@ -157,11 +198,6 @@ def main():
         callback=[checkpoint_callback, metrics_callback],
         progress_bar=True
     )
-    
-    # Load previous model if provided (for curriculum)
-    if args.load_model:
-        print(f"Loading previous model: {args.load_model}")
-        model = PPO.load(args.load_model, env=vec_env)
 
 
     # -------------------------------------------------------------------------
