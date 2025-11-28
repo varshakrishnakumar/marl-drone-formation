@@ -11,6 +11,7 @@ from stable_baselines3.common.vec_env.vec_normalize import VecNormalize
 from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.utils import get_schedule_fn
+from stable_baselines3.common.buffers import RolloutBuffer
 
 from sim.envs.multi_drone_quad_env import MultiDroneQuadEnv
 from sim.envs.callbacks import CustomMetricsCallback
@@ -149,10 +150,25 @@ def main():
             model.learning_rate = learning_rate
             model.lr_schedule = get_schedule_fn(model.learning_rate)
 
+        buffer_reset_needed = False
+
         if "gamma" in hyperparams:
             model.gamma = hyperparams["gamma"]
+            buffer_reset_needed = True
         if "n_steps" in hyperparams:
             model.n_steps = hyperparams["n_steps"]
+            buffer_reset_needed = True
+
+        if buffer_reset_needed:
+            model.rollout_buffer = RolloutBuffer(
+                model.n_steps,
+                model.observation_space,
+                model.action_space,
+                model.device,
+                gae_lambda=model.gae_lambda,
+                gamma=model.gamma,
+                n_envs=model.n_envs,
+            )
 
     else:
         model = PPO(

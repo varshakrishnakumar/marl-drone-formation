@@ -79,7 +79,7 @@ class MultiDroneQuadEnv(gym.Env):
         self.static_obs_dim = 3 * self.num_static_obstacles
         self.dynamic_obs_dim = 3
 
-        # Leader error (3D) – same for all drones
+        # Desired-slot error (3D) per drone
         self.leader_err_dim = 3
 
         # Per-drone obs size
@@ -546,7 +546,7 @@ class MultiDroneQuadEnv(gym.Env):
              neighbors_rel (6*(N-1)),
              static_obs_rel (3*4),
              dyn_obs_rel (3),
-             leader_error (3)]
+             desired_slot_error (3)]
         """
         all_states = [self._get_state(i) for i in range(self.num_drones)]
 
@@ -561,8 +561,6 @@ class MultiDroneQuadEnv(gym.Env):
         )
 
         leader_target = self.leader_trajectory(self.leader_traj_t)
-        leader_pos = all_states[0][0]
-        leader_error = leader_target - leader_pos
 
         obs_list = []
 
@@ -590,6 +588,11 @@ class MultiDroneQuadEnv(gym.Env):
             )
             dyn_rel = dyn_pos - pos_i
 
+            desired_slot = leader_target + self.formation_offsets.get(
+                i, np.zeros(3, dtype=np.float32)
+            )
+            desired_error = desired_slot - pos_i
+
             full_obs = np.concatenate(
                 [
                     pos_i,
@@ -599,7 +602,7 @@ class MultiDroneQuadEnv(gym.Env):
                     neighbors,
                     static_rel,
                     dyn_rel,
-                    leader_error,
+                    desired_error,
                 ]
             )
 
