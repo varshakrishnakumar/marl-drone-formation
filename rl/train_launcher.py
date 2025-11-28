@@ -9,10 +9,15 @@ import subprocess
 # CURRICULUM DEFINITION
 # -------------------------------------------------------------------------
 CURRICULUM = [
-    # (env_kwargs, timesteps, name)
-    ({"num_drones": 3, "gui": False}, 1_000_000, "stage1_easy"),
-    ({"num_drones": 5, "gui": False}, 1_500_000, "stage2_full"),
-    ({"num_drones": 5, "gui": False}, 4_500_000, "stage3_obstacles"),
+    # (env_kwargs, timesteps, name, hyperparams)
+    ({"num_drones": 3, "gui": False}, 1_000_000, "stage1_easy", None),
+    ({"num_drones": 5, "gui": False}, 1_500_000, "stage2_full", None),
+    (
+        {"num_drones": 5, "gui": False},
+        4_500_000,
+        "stage3_obstacles",
+        {"learning_rate": 1e-4, "target_kl": 0.04},
+    ),
 ]
 
 
@@ -43,7 +48,8 @@ def run_curriculum(run_name):
 
     prev_model = None
 
-    for stage_idx, (env_kwargs, timesteps, tag) in enumerate(CURRICULUM):
+    for stage in CURRICULUM:
+        env_kwargs, timesteps, tag, hyper = stage
 
         stage_name = f"{run_name}_{tag}"
 
@@ -51,6 +57,10 @@ def run_curriculum(run_name):
               f"--run-name {stage_name} " \
               f"--timesteps {timesteps} " \
               f"--num-drones {env_kwargs['num_drones']} "
+
+        if hyper:
+            hp_json = json.dumps(hyper)
+            cmd += f"--hyper '{hp_json}' "
 
         if prev_model:
             cmd += f"--load-model {prev_model} "
