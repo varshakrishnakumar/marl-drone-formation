@@ -9,6 +9,8 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.vec_env.vec_normalize import VecNormalize
 from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.logger import configure
+from stable_baselines3.common.utils import get_schedule_fn
 
 from sim.envs.multi_drone_quad_env import MultiDroneQuadEnv
 from sim.envs.callbacks import CustomMetricsCallback
@@ -145,7 +147,7 @@ def main():
 
         if learning_rate is not None:
             model.learning_rate = learning_rate
-            model.lr_schedule = model._get_schedule_fn(model.learning_rate)
+            model.lr_schedule = get_schedule_fn(model.learning_rate)
 
         if "gamma" in hyperparams:
             model.gamma = hyperparams["gamma"]

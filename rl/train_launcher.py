@@ -10,8 +10,8 @@ import subprocess
 # -------------------------------------------------------------------------
 CURRICULUM = [
     # (env_kwargs, timesteps, name, hyperparams)
-    ({"num_drones": 3, "gui": False}, 1_000_000, "stage1_easy", None),
-    ({"num_drones": 5, "gui": False}, 1_500_000, "stage2_full", None),
+    ({"num_drones": 5, "gui": False}, 1_500_000, "stage1_easy", None),
+    ({"num_drones": 5, "gui": False}, 2_500_000, "stage2_full", None),
     (
         {"num_drones": 5, "gui": False},
         4_500_000,
