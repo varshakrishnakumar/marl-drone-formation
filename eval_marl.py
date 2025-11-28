@@ -1,9 +1,10 @@
 import argparse
-import time
-import os
 import csv
-import json
 import datetime
+import json
+import os
+import time
+
 import numpy as np
 
 import matplotlib.pyplot as plt
