@@ -1,9 +1,8 @@
-import os
 import argparse
-import itertools
 import datetime
-import subprocess
+import itertools
 import json
+import subprocess
 
 
 # -------------------------------------------------------------------------
