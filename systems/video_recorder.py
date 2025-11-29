@@ -5,6 +5,7 @@ import imageio.v2 as imageio
 import numpy as np
 
 
+
 class VideoRecorder:
     """Simple video recorder that appends RGB frames and writes on close."""
 

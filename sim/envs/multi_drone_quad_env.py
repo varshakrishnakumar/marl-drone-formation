@@ -853,7 +853,7 @@ class MultiDroneQuadEnv(gym.Env):
 
         lx, ly, lz = leader_pos
 
-        distance = 3.0
+        distance = 2.0
         yaw = 35
         pitch = -30
 
