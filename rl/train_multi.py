@@ -15,6 +15,7 @@ from stable_baselines3.common.buffers import RolloutBuffer
 
 from sim.envs.multi_drone_quad_env import MultiDroneQuadEnv
 from sim.envs.callbacks import CustomMetricsCallback
+from stable_baselines3.common.buffers import RolloutBuffer
 
 
 # -----------------------------------------------------------------------------

@@ -170,6 +170,9 @@ def main():
 
         # ---- LIVE DASHBOARD ----
         dashboard.update(obs_all, desired_positions, reward)
+        
+        if terminated or truncated:
+            obs, _ = env.reset()
 
         # ---- RESET IF END ----
         if terminated or truncated:
@@ -205,6 +208,9 @@ def main():
                 recorder = None
 
         time.sleep(dt)
+        if recorder:
+            recorder.close()
+            print(f"Video saved → {args.video}")
 
     if recorder:
         recorder.close()
