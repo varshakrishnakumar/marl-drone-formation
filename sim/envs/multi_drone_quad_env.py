@@ -79,7 +79,7 @@ class MultiDroneQuadEnv(gym.Env):
         self.static_obs_dim = 3 * self.num_static_obstacles
         self.dynamic_obs_dim = 3
 
-        # Leader error (3D) shared across drones
+        # Leader error (3D) – same for all drones
         self.leader_err_dim = 3
 
         # Per-drone obs size
@@ -416,25 +416,25 @@ class MultiDroneQuadEnv(gym.Env):
         # -----------------------------
         # Episode randomization knobs
         # -----------------------------
-        scale = np.random.uniform(0.5, 1.8)        # size difficulty
-        x0    = np.random.uniform(1.0, 2.5)        # initial X placement
-        y0    = np.random.uniform(-0.5, 0.5)       # initial Y
-        z0    = np.random.uniform(0.25, 0.6)       # initial Z
-        amp   = np.random.uniform(0.2, 1.0)        # motion amplitude
-        speed = np.random.uniform(0.02, 0.08)      # oscillation speed
-        phase = np.random.uniform(0, 2*np.pi)      # initial oscillation phase
-    
-        # Store parameters for motion + logging
+        scale = np.random.uniform(0.5, 1.2)        # a bit smaller to reduce early collisions
+        x0    = np.random.uniform(1.0, 2.5)
+        y0    = np.random.uniform(-0.5, 0.5)
+        z0    = np.random.uniform(0.9, 1.1)        # <-- around target_z = 1.0
+
+        amp   = np.random.uniform(0.2, 0.8)
+        speed = np.random.uniform(0.02, 0.06)
+        phase = np.random.uniform(0, 2*np.pi)
+
         self.dynamic_amp = amp
         self.dynamic_speed = speed
         self.dynamic_phase = phase
         self.dynamic_scale = scale
-    
+
         sphere_id = p.loadURDF(
             os.path.join(ASSETS_DIR, "sphere_small.urdf"),
             basePosition=[x0, y0, z0],
             baseOrientation=[0, 0, 0, 1],
-            globalScaling=scale,                # <---- episode scaling applied here
+            globalScaling=scale,
             useFixedBase=False,
         )
     
@@ -451,90 +451,52 @@ class MultiDroneQuadEnv(gym.Env):
 
 
     def _update_dynamic_obstacle(self):
-        """
-        Dynamic obstacle performs:
-          - Chasing behavior toward selected drone
-          - Sinusoidal oscillation in Y with randomized amplitude/speed/phase
-          - Difficulty ramp as episode progresses
-          - All motion uses obstacle parameters set in _spawn_dynamic_obstacle()
-        """
-    
-        # -----------------------------------
-        # 1. Get random oscillation parameters
-        # -----------------------------------
         self.dynamic_phase += self.dynamic_speed
         osc_y = self.dynamic_amp * np.sin(self.dynamic_phase)
-    
-        # Current obstacle position
+
         obs_pos, _ = p.getBasePositionAndOrientation(self.dynamic_obstacle_id)
         obs_pos = np.array(obs_pos, dtype=np.float32)
-    
-        x0 = obs_pos[0]   # keep X from spawn
-        z0 = obs_pos[2]   # keep Z from spawn
-        y0 = osc_y        # sinusoidal motion added in Y
-    
-        # -----------------------------------
+
         # 2. Drone-chasing target position
-        # -----------------------------------
         target_pos, _ = p.getBasePositionAndOrientation(
             self.drone_ids[self.chase_target_drone]
         )
         target_pos = np.array(target_pos, dtype=np.float32)
-    
-        # -----------------------------------
-        # 3. Direction toward target (X/Z only)
-        #    We let oscillation control Y, and chasing control X/Z.
-        # -----------------------------------
+
+        # Chase direction in full 3D
         chase_dir = target_pos - obs_pos
-        chase_dir[1] = 0.0    # XZ chase only, Y handled by oscillation
-    
         norm = np.linalg.norm(chase_dir)
         if norm > 1e-6:
-            chase_dir = chase_dir / norm
+            chase_dir /= norm
         else:
             chase_dir[:] = 0.0
-    
-        # -----------------------------------
-        # 4. Difficulty ramp: aggression increases over time
-        # -----------------------------------
+
         difficulty = min(1.0, self.step_count / 5000.0)
-    
-        max_speed = 0.3 + 0.7 * difficulty     # 0.3 → 1.0 m/s
-        gain = 0.15 + 0.35 * difficulty        # PD gain ramp
-    
-        # -----------------------------------
-        # 5. Velocity PD control toward target
-        # -----------------------------------
+        max_speed = 0.3 + 0.7 * difficulty
+        gain = 0.15 + 0.35 * difficulty
+
         vel, _ = p.getBaseVelocity(self.dynamic_obstacle_id)
         vel = np.array(vel, dtype=np.float32)
-    
+
         vel_desired = chase_dir * max_speed
-    
         accel = gain * (vel_desired - vel)
         dt = self.time_step
-    
         new_vel = vel + accel * dt
-    
-        # Clamp final speed
+
         speed = np.linalg.norm(new_vel)
         if speed > max_speed:
             new_vel *= max_speed / (speed + 1e-8)
-    
-        # -----------------------------------
-        # 6. Apply motion:
-        #    - New linear velocity (XZ chasing)
-        #    - Oscillation-driven Y-position
-        # -----------------------------------
-    
-        # Update velocity first
+
+        # Apply velocity
         p.resetBaseVelocity(self.dynamic_obstacle_id, new_vel.tolist(), [0, 0, 0])
-    
-        # Then override Y position with oscillation
+
+        # Override only Y with oscillation (centered at current Y)
         p.resetBasePositionAndOrientation(
             self.dynamic_obstacle_id,
-            [obs_pos[0], y0, obs_pos[2]],
+            [obs_pos[0], obs_pos[1] + osc_y, obs_pos[2]],
             [0, 0, 0, 1],
         )
+
 
 
 
@@ -543,10 +505,10 @@ class MultiDroneQuadEnv(gym.Env):
         Returns an array of shape (num_drones, per_drone_obs_dim).
         Per-drone obs:
             [pos (3), vel (3), euler rpy (3), ang_vel (3),
-             neighbors_rel (6*(N-1)),
-             static_obs_rel (3*4),
-             dyn_obs_rel (3),
-             desired_slot_error (3)]
+            neighbors_rel (6*(N-1)),
+            static_obs_rel (3*4),
+            dyn_obs_rel (3),
+            slot_error (3)]
         """
         all_states = [self._get_state(i) for i in range(self.num_drones)]
 
@@ -567,7 +529,7 @@ class MultiDroneQuadEnv(gym.Env):
         for i in range(self.num_drones):
             pos_i, vel_i, euler_i, ang_i = all_states[i]
 
-            # Neighbors
+            # ---------- neighbors_rel ----------
             neighbor_chunks = []
             for j in range(self.num_drones):
                 if i == j:
@@ -582,15 +544,19 @@ class MultiDroneQuadEnv(gym.Env):
                 else np.zeros(self.neighbor_dim, dtype=np.float32)
             )
 
+            # ---------- static_obs_rel ----------
             static_rel = np.concatenate(
                 [s - pos_i for s in static_states],
                 dtype=np.float32,
             )
+
+            # ---------- dyn_obs_rel ----------
             dyn_rel = dyn_pos - pos_i
 
-            # Global leader error (shared) instead of per-drone desired slot.
-            leader_pos = all_states[0][0]
-            leader_error = leader_target - leader_pos
+            # ---------- slot_error (desired formation slot for this drone) ----------
+            offset = self.formation_offsets.get(i, np.zeros(3, dtype=np.float32))
+            desired = leader_target + offset
+            slot_error = desired - pos_i
 
             full_obs = np.concatenate(
                 [
@@ -601,13 +567,14 @@ class MultiDroneQuadEnv(gym.Env):
                     neighbors,
                     static_rel,
                     dyn_rel,
-                    leader_error,
+                    slot_error,
                 ]
             )
 
             obs_list.append(full_obs.astype(np.float32))
 
         return np.vstack(obs_list)
+
 
     # ------------------------------------------------------------
     # STATE
@@ -709,25 +676,11 @@ class MultiDroneQuadEnv(gym.Env):
     # REWARD
     # ------------------------------------------------------------
     def _compute_rewards(self, obs_all: np.ndarray):
-        """
-        obs_all: (num_drones, per_drone_obs_dim)
-
-        Components (per drone):
-            r_form      = -||pos - desired||          (clipped)
-            r_height    = -|z - target_z|
-            r_orient    = -(|roll| + |pitch|)
-            r_angvel    = -0.05 * ||ang_vel||
-            r_smooth    = -0.01 * ||vel||
-            r_close     = +1.0 if formation error < 0.15 m else 0
-            r_avoid     = soft penalty when obstacle is near
-            r_safe      = small bonus when in formation AND obstacle far
-            + collision penalty (-5) if ANY drone hits obstacle
-        """
         rewards = []
-        collision_penalty = 0.0
-
-        # Collision check (once per step)
         self.collision_happened = False
+
+        # --- collision: any drone vs any obstacle ---
+        collision_penalty = 0.0
         for i in range(self.num_drones):
             for obs in self.obstacle_ids + [self.dynamic_obstacle_id]:
                 if p.getContactPoints(self.drone_ids[i], obs):
@@ -738,14 +691,14 @@ class MultiDroneQuadEnv(gym.Env):
                 break
 
         leader_target = self.leader_trajectory(self.leader_traj_t)
-
-        # Dynamic obstacle position for proximity reward
         dyn_pos = np.array(
             p.getBasePositionAndOrientation(self.dynamic_obstacle_id)[0],
             dtype=np.float32,
         )
-        danger_radius = 0.5
-        safe_radius = 1.0
+
+        form_errs = []
+        z_errs = []
+        dyn_dists = []
 
         for i in range(self.num_drones):
             pos = obs_all[i][0:3]
@@ -753,86 +706,81 @@ class MultiDroneQuadEnv(gym.Env):
             euler = obs_all[i][6:9]
             ang = obs_all[i][9:12]
 
-            # Desired formation position
             offset = self.formation_offsets.get(i, np.zeros(3, dtype=np.float32))
             desired = leader_target + offset
 
-            raw_form_err = np.linalg.norm(pos - desired)
+            form_err = np.linalg.norm(pos - desired)
+            form_errs.append(form_err)
+            z_errs.append(abs(pos[2] - self.target_z))
 
-            # Penalize formation error (clipped so it doesn't dominate)
-            r_form = -np.clip(raw_form_err, 0.0, 2.0)
-
-            # Height tracking
-            r_height = -abs(pos[2] - self.target_z)
-
-            roll, pitch, _ = euler
-            r_orient = -(abs(roll) + abs(pitch))
-
-            r_angvel = -0.05 * np.linalg.norm(ang)
-            r_smooth = -0.01 * np.linalg.norm(vel)
-
-            # Bonus for being close to desired formation slot
-            r_close = 1.0 if raw_form_err < 0.15 else 0.0
-
-            # --- Obstacle avoidance ---
             d_dyn = np.linalg.norm(dyn_pos - pos)
+            dyn_dists.append(d_dyn)
 
-            # Soft penalty if obstacle is within danger_radius
-            if d_dyn < danger_radius:
-                r_avoid = -2.0 * (danger_radius - d_dyn)
-            else:
-                r_avoid = 0.0
+        form_errs = np.array(form_errs, dtype=np.float32)
+        dyn_dists = np.array(dyn_dists, dtype=np.float32)
 
-            # Small bonus when in good formation AND obstacle is far
-            if (raw_form_err < 0.2) and (d_dyn > safe_radius):
-                r_safe = 0.5
-            else:
-                r_safe = 0.0
+        mean_form_err = float(np.mean(form_errs))
+        max_form_err = float(np.max(form_errs))
+        min_dyn_dist = float(np.min(dyn_dists))
 
-            reward = (
-                r_form
-                + 0.5 * r_height
-                + 0.1 * r_orient
-                + r_angvel
-                + r_smooth
-                + r_close
-                + r_avoid
-                + r_safe
-                + collision_penalty
-            )
-            rewards.append(float(reward))
-            
-                # ---- aggregate metrics for logging ----
-        form_errs = []
-        z_errs = []
-        dyn_dists = []
+        # --- formation reward (shared across drones) ---
+        # stronger weight so they really care
+        r_form = -2.0 * mean_form_err          # drives mean_form_error < 2
+        r_form -= 0.5 * max_form_err           # punishes one drone drifting out
 
-        leader_target = self.leader_trajectory(self.leader_traj_t)
-        dyn_pos = np.array(
-            p.getBasePositionAndOrientation(self.dynamic_obstacle_id)[0],
-            dtype=np.float32,
+        # small bonus if tight formation
+        if mean_form_err < 0.5:
+            r_tight = 1.0
+        else:
+            r_tight = 0.0
+
+        # --- altitude / attitude penalties (just to keep them reasonable) ---
+        # don't make altitude too dominant (PD already stabilizes)
+        r_height = -0.5 * np.mean(z_errs)
+
+        # (optional) small smoothness term
+        speeds = [np.linalg.norm(obs_all[i][3:6]) for i in range(self.num_drones)]
+        r_smooth = -0.01 * float(np.mean(speeds))
+
+        # --- team-based obstacle avoidance ---
+        danger_radius = 0.8
+        safe_radius = 1.5
+
+        if min_dyn_dist < danger_radius:
+            # penalize entire team if sphere is close to ANY drone
+            r_avoid = -3.0 * (danger_radius - min_dyn_dist)
+        else:
+            r_avoid = 0.0
+
+        # bonus for staying in formation AND keeping sphere far
+        if (mean_form_err < 0.5) and (min_dyn_dist > safe_radius):
+            r_safe = 1.0
+        else:
+            r_safe = 0.0
+
+        # shared team reward (each drone gets the same)
+        team_reward = (
+            r_form
+            + r_tight
+            + r_height
+            + r_smooth
+            + r_avoid
+            + r_safe
+            + collision_penalty
         )
 
-        for i in range(self.num_drones):
-            pos = obs_all[i][0:3]
-            euler = obs_all[i][6:9]
-            ang = obs_all[i][9:12]
+        rewards = [float(team_reward)] * self.num_drones
 
-            offset = self.formation_offsets.get(i, np.zeros(3, dtype=np.float32))
-            desired = leader_target + offset
-
-            form_errs.append(np.linalg.norm(pos - desired))
-            z_errs.append(abs(pos[2] - self.target_z))
-            dyn_dists.append(np.linalg.norm(dyn_pos - pos))
-
+        # logging
         self.last_metrics = {
-            "mean_form_error": float(np.mean(form_errs)),
+            "mean_form_error": mean_form_err,
             "mean_z_error": float(np.mean(z_errs)),
-            "min_dyn_distance": float(np.min(dyn_dists)),
+            "min_dyn_distance": min_dyn_dist,
             "collision": float(self.collision_happened),
         }
 
         return rewards
+
 
 
     # ------------------------------------------------------------
@@ -846,7 +794,7 @@ class MultiDroneQuadEnv(gym.Env):
 
         lx, ly, lz = leader_pos
 
-        distance = 2.0
+        distance = 3.0
         yaw = 35
         pitch = -30
 
