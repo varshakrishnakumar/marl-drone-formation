@@ -79,7 +79,7 @@ class MultiDroneQuadEnv(gym.Env):
         self.static_obs_dim = 3 * self.num_static_obstacles
         self.dynamic_obs_dim = 3
 
-        # Desired-slot error (3D) per drone
+        # Leader error (3D) shared across drones
         self.leader_err_dim = 3
 
         # Per-drone obs size
@@ -588,10 +588,9 @@ class MultiDroneQuadEnv(gym.Env):
             )
             dyn_rel = dyn_pos - pos_i
 
-            desired_slot = leader_target + self.formation_offsets.get(
-                i, np.zeros(3, dtype=np.float32)
-            )
-            desired_error = desired_slot - pos_i
+            # Global leader error (shared) instead of per-drone desired slot.
+            leader_pos = all_states[0][0]
+            leader_error = leader_target - leader_pos
 
             full_obs = np.concatenate(
                 [
@@ -602,7 +601,7 @@ class MultiDroneQuadEnv(gym.Env):
                     neighbors,
                     static_rel,
                     dyn_rel,
-                    desired_error,
+                    leader_error,
                 ]
             )
 
@@ -745,10 +744,8 @@ class MultiDroneQuadEnv(gym.Env):
             p.getBasePositionAndOrientation(self.dynamic_obstacle_id)[0],
             dtype=np.float32,
         )
-        # Larger keep-out zones around the attacking sphere to make avoidance
-        # behavior salient during training.
-        danger_radius = 0.8
-        safe_radius = 1.5
+        danger_radius = 0.5
+        safe_radius = 1.0
 
         for i in range(self.num_drones):
             pos = obs_all[i][0:3]
@@ -780,24 +777,20 @@ class MultiDroneQuadEnv(gym.Env):
             # --- Obstacle avoidance ---
             d_dyn = np.linalg.norm(dyn_pos - pos)
 
-            # Soft penalty if obstacle is within danger_radius, with a sharper
-            # quadratic wall to keep drones away from the sphere. A mild penalty
-            # applies inside the safe radius to preserve standoff distance.
+            # Soft penalty if obstacle is within danger_radius
             if d_dyn < danger_radius:
-                r_avoid = -3.0 * (danger_radius - d_dyn) ** 2 - 1.0
-            elif d_dyn < safe_radius:
-                r_avoid = -0.5 * (safe_radius - d_dyn)
+                r_avoid = -2.0 * (danger_radius - d_dyn)
             else:
                 r_avoid = 0.0
 
             # Small bonus when in good formation AND obstacle is far
-            if (raw_form_err < 0.15) and (d_dyn > safe_radius):
-                r_safe = 0.75
+            if (raw_form_err < 0.2) and (d_dyn > safe_radius):
+                r_safe = 0.5
             else:
                 r_safe = 0.0
 
             reward = (
-                1.5 * r_form
+                r_form
                 + 0.5 * r_height
                 + 0.1 * r_orient
                 + r_angvel
