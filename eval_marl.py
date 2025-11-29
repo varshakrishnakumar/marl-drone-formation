@@ -170,6 +170,9 @@ def main():
 
         # ---- LIVE DASHBOARD ----
         dashboard.update(obs_all, desired_positions, reward)
+        
+        if terminated or truncated:
+            obs, _ = env.reset()
 
         # ---- VIDEO ----
         if recorder:
@@ -199,10 +202,12 @@ def main():
             recorder.add_frame(rgb[:, :, :3])
 
         # ---- RESET IF END ----
-        if terminated or truncated:
-            obs, _ = env.reset()
+        
 
         time.sleep(dt)
+        if recorder:
+            recorder.close()
+            print(f"Video saved → {args.video}")
 
     # ---- SAVE JSON LOG ----
     with open(f"logs/{json_path}", "w") as jf:
@@ -211,8 +216,6 @@ def main():
     print(f"JSON logging → logs/{json_path}")
 
     # Close CSV + video
-    if recorder:
-        recorder.save()
     csv_file.close()
 
     print("ACTION SAMPLE:", np.mean(np.abs(action)))
