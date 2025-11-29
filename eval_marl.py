@@ -174,6 +174,10 @@ def main():
         if terminated or truncated:
             obs, _ = env.reset()
 
+        # ---- RESET IF END ----
+        if terminated or truncated:
+            obs, _ = env.reset()
+
         # ---- VIDEO ----
         if recorder:
             leader_pos, _ = p.getBasePositionAndOrientation(env.drone_ids[0])
@@ -199,15 +203,18 @@ def main():
                 renderer=p.ER_BULLET_HARDWARE_OPENGL if args.gui else p.ER_TINY_RENDERER
             )
 
-            recorder.add_frame(rgb[:, :, :3])
-
-        # ---- RESET IF END ----
-        
+            if not recorder.add_frame(rgb[:, :, :3]):
+                print("[WARN] Video recorder closed unexpectedly; stopping recording.")
+                recorder = None
 
         time.sleep(dt)
         if recorder:
             recorder.close()
             print(f"Video saved → {args.video}")
+
+    if recorder:
+        recorder.close()
+        print(f"Video saved → {args.video}")
 
     # ---- SAVE JSON LOG ----
     with open(f"logs/{json_path}", "w") as jf:
@@ -215,7 +222,7 @@ def main():
 
     print(f"JSON logging → logs/{json_path}")
 
-    # Close CSV + video
+    # Close CSV
     csv_file.close()
 
     print("ACTION SAMPLE:", np.mean(np.abs(action)))
