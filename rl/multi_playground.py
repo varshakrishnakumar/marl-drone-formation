@@ -47,14 +47,12 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Check that model exists
     if not os.path.exists(args.model):
         raise FileNotFoundError(f"Model not found: {args.model}")
 
     print(f"Loading model: {args.model}")
     model = PPO.load(args.model)
 
-    # Create evaluation environment with GUI
     env = MultiDroneEnv(num_drones=args.num_drones, gui=True)
     obs, _ = env.reset()
 
@@ -63,17 +61,14 @@ def main():
     print("Starting evaluation... Press Ctrl+C to quit.")
 
     for step in range(args.steps):
-        # Get action
         action, _ = model.predict(obs, deterministic=True)
 
-        # Env step
         obs, reward, terminated, truncated, info = env.step(action)
 
         if terminated or truncated:
             print("Environment signaled termination. Resetting...")
             obs, _ = env.reset()
 
-        # Wait to simulate FPS timing
         time.sleep(dt)
 
     print("Evaluation finished.")

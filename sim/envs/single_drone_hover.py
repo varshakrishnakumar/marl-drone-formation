@@ -4,42 +4,22 @@ import pybullet as p
 import pybullet_data
 import numpy as np
 
-## Uncomment for Windows
-# import pygetwindow as gw
-# import pyautogui
 
-# --- Fix Windows text cutoff / DPI scaling issue ---
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"
 
-# --- Start a fresh GUI session (avoid leftover camera states) ---
 if p.isConnected():
     p.disconnect()
 
 p.connect(p.GUI)
-time.sleep(1)  # small delay to let window appear
-# Find and bring PyBullet window to front -- Uncomment for Windows
-# for win in gw.getWindowsWithTitle('PyBullet'):
-#     win.activate()
-#     win.restore()
-#     pyautogui.click(win.left + 50, win.top + 50)  # give it focus
-#     break
+time.sleep(1)
 p.setAdditionalSearchPath(pybullet_data.getDataPath())
 p.resetSimulation()
 p.setGravity(0, 0, -9.81)
 
-# --- Reset camera to a consistent default view each run ---
-# p.resetDebugVisualizerCamera(
-#     cameraDistance=3.0,
-#     cameraYaw=50.0,
-#     cameraPitch=-30.0,
-#     cameraTargetPosition=[0, 0, 0]
-# )
 
-# Enable basic controls
 p.configureDebugVisualizer(p.COV_ENABLE_MOUSE_PICKING, 1)
 p.configureDebugVisualizer(p.COV_ENABLE_KEYBOARD_SHORTCUTS, 1)
 
-# --- Load world elements ---
 HERE = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(HERE, "../assets/crazyflie/cf_assets")
 
@@ -48,7 +28,6 @@ p.setAdditionalSearchPath(pybullet_data.getDataPath())
 drone = p.loadURDF(os.path.join(ASSETS, "cf2x.urdf"), [0, 0, 0.5])
 print("Drone ID:", drone)
 
-# Obstacle (static red cube)
 colCube = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.2, 0.2, 0.2])
 visCube = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.2, 0.2, 0.2],
                               rgbaColor=[1, 0, 0, 1])
@@ -59,17 +38,15 @@ obstacle = p.createMultiBody(
     basePosition=[0, 0, 0]
 )
 
-# --- Hover control setup ---
 mass = p.getDynamicsInfo(drone, -1)[0]
 hover_force = mass * 9.81
 print(f"Mass = {mass:.3f} kg → Hover force = {hover_force:.3f} N")
 
 target_height = 1.5
-kp = 15.0  # proportional gain
+kp = 15.0
 log_data = []
 step = 0
 
-# --- Simulation loop of 20 seconds---
 for step in range(1000):
     pos, _ = p.getBasePositionAndOrientation(drone)
     err = target_height - pos[2]
@@ -77,7 +54,6 @@ for step in range(1000):
     print("Error", err)
     print("Control output (thrust):",thrust,"N")
     
-    # Apply force in body frame (vertical thrust)
     p.applyExternalForce(
         drone, -1,
         [0, 0, thrust ],
@@ -87,7 +63,6 @@ for step in range(1000):
     
     p.stepSimulation()
     
-    #if collision is detected, print and end simulation 
     contacts = p.getContactPoints(drone, obstacle)
     if contacts:
         print(f"Collision! {len(contacts)} points, penetration {contacts[0][8]:.4f} m")
@@ -95,27 +70,17 @@ for step in range(1000):
         p.disconnect()
     
     
-    # Log: time (s), height (m), error (m), thrust (N)
     log_data.append([step / 240, pos[2], err, thrust])
-    time.sleep(1/240) #time step
+    time.sleep(1/240)
     
-    # Apply force in body frame (horizontal thrust)
-    #p.applyExternalForce(
-        #drone, -1,
-        #[0, 4, 0],
-        #[0, 0, 0],
-        #p.LINK_FRAME
-    #)
 
 
-# --- Save data to file ---
 log_data = np.array(log_data)
 np.savetxt("altitude_log.csv", log_data,
            delimiter=",",
            header="time_s,height_m,error_m,thrust_N",
            comments="")
 
-# --- Cleanly close connection after run ---
 p.disconnect()
 
 print("Simulation complete. Logged data saved to altitude_log.csv")

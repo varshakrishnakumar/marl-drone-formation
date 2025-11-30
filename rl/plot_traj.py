@@ -7,7 +7,7 @@ LOG_PATH = "logs/playground_runs.npy"
 
 
 def main():
-    data = np.load(LOG_PATH)   # shape = (T, num_drones, 3)
+    data = np.load(LOG_PATH)
     T, N, _ = data.shape
 
     fig = plt.figure()

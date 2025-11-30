@@ -7,7 +7,7 @@ LOG_PATH = "logs/playground_runs.npy"
 
 
 def main():
-    data = np.load(LOG_PATH)  # shape = (T, N, 3)
+    data = np.load(LOG_PATH)
     T, N, _ = data.shape
 
     pairs = list(combinations(range(N), 2))
@@ -20,7 +20,7 @@ def main():
     plt.title("Inter-Drone Distance")
     plt.xlabel("Time step")
     plt.ylabel("Distance [m]")
-    plt.axhline(0.2, color="r", linestyle="--", label="Min Safe Dist")  # adjust if needed
+    plt.axhline(0.2, color="r", linestyle="--", label="Min Safe Dist")
     plt.legend()
     plt.show()
 

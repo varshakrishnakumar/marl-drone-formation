@@ -3,10 +3,8 @@ from sim.envs.single_drone_env import SingleDroneEnv
 import matplotlib.pyplot as plt
 import pandas as pd
 
-# --- Initialize environment ---
 env = SingleDroneEnv(gui=False)
 
-# --- Train PPO model ---
 model = PPO(
     "MlpPolicy",
     env,
@@ -23,9 +21,8 @@ model = PPO(
 model.learn(total_timesteps=200_000)
 model.save("ppo_single_hover")
 
-# --- Evaluate trained policy ---
 print("\n[INFO] Evaluating trained PPO policy...\n")
-env.log_data = []  # clear any old training logs
+env.log_data = []
 obs, _ = env.reset()
 
 for _ in range(1000):
@@ -34,11 +31,9 @@ for _ in range(1000):
     if term or trunc:
         obs, _ = env.reset()
 
-# --- Save evaluation log ---
 env.save_log("hover_training_log.csv")
 env.close()
 
-# --- Plot rewards per episode ---
 df = pd.read_csv("hover_training_log.csv")
 df["episode"] = (df["step"] // 1000)
 
@@ -53,7 +48,6 @@ plt.tight_layout()
 plt.savefig("reward_curve.png")
 plt.show()
 
-# --- Plot mean altitude over episodes ---
 plt.figure(figsize=(10, 5))
 plt.plot(df.groupby("episode")["z"].mean(), label="Mean Height (m)", color="orange")
 plt.xlabel("Episode")

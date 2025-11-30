@@ -17,24 +17,19 @@ class SingleDroneEnv(gym.Env):
         self.max_steps = 1000
         self.target_z = 1.0
         self.kp = 10.0
-        # log data!!
         self.log_data = []
 
-        # Connect to PyBullet
         self.cid = p.connect(p.GUI if gui else p.DIRECT)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setGravity(0, 0, -9.81)
         p.setTimeStep(self.time_step)
 
-        # Load plane + drone
         base_dir = os.path.dirname(os.path.abspath(__file__))
         asset_path = os.path.join(base_dir, "../assets/crazyflie/cf_assets/cf2x.urdf")
         self.plane = p.loadURDF("plane.urdf")
         self.drone = p.loadURDF(asset_path, [0, 0, 0.5])
 
-        # Observation: [z, z_dot, error]
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32)
-        # Action: normalized thrust (0 to 1)
         self.action_space = spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32)
 
         self.step_count = 0
@@ -60,11 +55,9 @@ class SingleDroneEnv(gym.Env):
     def step(self, action):
         """Apply an action, advance physics, and compute reward."""
 
-        # --- Apply action ---
         thrust_ratio = float(np.clip(action[0], 0, 1))
-        thrust = thrust_ratio * 2 * self.hover_force   # scale thrust up to 2× hover
+        thrust = thrust_ratio * 2 * self.hover_force
 
-        # Apply force upward in body frame
         p.applyExternalForce(
             self.drone, -1,
             [0, 0, thrust],
@@ -72,31 +65,23 @@ class SingleDroneEnv(gym.Env):
             p.LINK_FRAME
         )
 
-        # Step physics
         p.stepSimulation()
         if self.gui:
             time.sleep(self.time_step)
 
-        # --- Observe new state ---
         obs = self._get_obs()
         z, z_dot, err = obs
 
-        # --- Compute reward ---
-        # Base reward: closer to target height = higher reward
         reward = 1.0 - abs(err)
 
-        # Penalty for vertical velocity (instability)
         reward -= 0.1 * abs(z_dot)
 
-        # Clip to reasonable range
         reward = float(np.clip(reward, -1, 1))
 
-        # --- Termination conditions ---
-        terminated = z < 0.1 or z > 3.0      # crashed or flew away
+        terminated = z < 0.1 or z > 3.0
         truncated = self.step_count >= self.max_steps
         self.step_count += 1
 
-        # --- Logging for analysis ---
         self.log_data.append({
             "step": self.step_count,
             "z": z,
@@ -104,13 +89,12 @@ class SingleDroneEnv(gym.Env):
             "reward": reward
         })
 
-        # --- Return Gymnasium-style output ---
         info = {}
         return obs, reward, terminated, truncated, info
 
 
     def render(self, mode="human"):
-        pass  # GUI handled automatically
+        pass
 
     def close(self):
         p.disconnect(self.cid)
@@ -125,5 +109,5 @@ if __name__ == "__main__":
     env = SingleDroneEnv(gui=True)
     obs = env.reset()
     for _ in range(500):
-        env.step([0.5])  # apply half hover thrust
+        env.step([0.5])
     env.close()

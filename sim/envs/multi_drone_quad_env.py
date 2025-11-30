@@ -13,138 +13,143 @@ URDF_PATH = os.path.join(ASSETS_DIR, "cf2x.urdf")
 class MultiDroneQuadEnv(gym.Env):
     """
     Centralized multi-drone quadrotor environment with high-level attitude control.
-
-    - One policy controls ALL drones.
-    - Action per drone: [roll_cmd, pitch_cmd, yaw_rate_cmd, thrust_cmd] in [-1, 1].
-      * roll_cmd, pitch_cmd → desired roll/pitch angles (scaled to +/- max_roll, max_pitch)
-      * yaw_rate_cmd       → desired yaw rate
-      * thrust_cmd         → thrust offset around hover
-    - A PD attitude controller converts these into forces/torques.
-    - Observation is a global vector: concatenated per-drone observations.
+    Eval toggles (reset(options=...)):
+      - leader_speed_scale: float (0.0 freezes leader trajectory motion)
+      - spawn_in_formation: bool (spawn at desired diamond slots)
+      - disable_dynamic:    bool (no chasing sphere)
+      - debug_diamond:      bool (render desired slots as green stems in GUI)
     """
 
     metadata = {"render_modes": ["human"], "render_fps": 60}
-
+    
     def __init__(self, num_drones: int = 5, gui: bool = False, max_steps: int = 2000):
         super().__init__()
-        print("DEBUG: MultiDroneQuadEnv loaded from:", __file__)
-
         if num_drones < 1:
             raise ValueError("MultiDroneQuadEnv requires at least 1 drone.")
-
         self.num_drones = num_drones
         self.gui = gui
-        if p.isConnected():
-            # Reuse existing physics server (likely a GUI)
-            self.physics_client = p.getConnectionInfo()['clientIndex']
-        else:
-            # Only open GUI if requested, otherwise DIRECT
-            self.physics_client = p.connect(p.GUI if self.gui else p.DIRECT)
 
+        if p.isConnected():
+            self.physics_client = p.getConnectionInfo()["clientIndex"]
+        else:
+            self.physics_client = p.connect(p.GUI if self.gui else p.DIRECT)
         p.setRealTimeSimulation(0)
+
+        self.max_steps = int(max_steps)
+        self.step_count = 0
         self.collision_happened = False
         self.last_metrics = {}
+        self.leader_traj_t = 0.0
+        self.drone_ids: list[int] = []
+        self.obstacle_ids: list[int] = []
+        self.dynamic_obstacle_id: int | None = None
+        self.dynamic_phase = 0.0
+        self._last_retarget_time = 0.0
 
-        # Episode length
-        self.max_steps = max_steps
-        self.step_count = 0
-
-        # ------------------------------------------
-        # High-level action space (per drone)
-        # ------------------------------------------
-        # [roll_cmd, pitch_cmd, yaw_rate_cmd, thrust_cmd]  in [-1, 1]
         self.act_per_drone = 4
         self.action_space = spaces.Box(
-            low=-1.0,
-            high=1.0,
-            shape=(self.num_drones * self.act_per_drone,),
-            dtype=np.float32,
+            low=-1.0, high=1.0, shape=(self.num_drones * self.act_per_drone,), dtype=np.float32
         )
-
-        # ------------------------------------------
-        # Observation design (per drone)
-        # ------------------------------------------
-        # self_dim:
-        #   3 pos (world)
-        #   3 lin vel (world)
-        #   3 euler angles (roll, pitch, yaw)
-        #   3 angular vel (world)
         self.self_dim = 12
-
-        # Neighbors: relative pos + vel for each other drone
         self.neighbor_dim = 6 * (self.num_drones - 1)
-
-        # Obstacles: 4 static boxes (3D rel pos each), 1 dynamic sphere (3D rel pos)
         self.num_static_obstacles = 4
         self.static_obs_dim = 3 * self.num_static_obstacles
         self.dynamic_obs_dim = 3
-
-        # Leader error (3D) – same for all drones
         self.leader_err_dim = 3
-
-        # Per-drone obs size
         self.per_drone_obs_dim = (
-            self.self_dim
-            + self.neighbor_dim
-            + self.static_obs_dim
-            + self.dynamic_obs_dim
-            + self.leader_err_dim
+            self.self_dim + self.neighbor_dim + self.static_obs_dim
+            + self.dynamic_obs_dim + self.leader_err_dim
         )
-
-        # Global observation (concatenated per-drone)
         global_obs_dim = self.per_drone_obs_dim * self.num_drones
-
         obs_high = np.ones(global_obs_dim, dtype=np.float32) * 1e6
         self.observation_space = spaces.Box(
-            low=-obs_high,
-            high=obs_high,
-            shape=(global_obs_dim,),
-            dtype=np.float32,
+            low=-obs_high, high=obs_high, shape=(global_obs_dim,), dtype=np.float32
         )
 
-        # ------------------------------------------
-        # Physics + control
-        # ------------------------------------------
         self.time_step = 1.0 / 240.0
         self.target_z = 1.0
-
-        # Will be set after loading URDF
         self.mass = None
         self.hover_thrust = None
 
-        # High-level limits
-        self.max_roll = np.deg2rad(10.0)    # rad
-        self.max_pitch = np.deg2rad(10.0)   # rad
-        self.max_yaw_rate = np.deg2rad(60.0)  # rad/s
+        self.max_roll = np.deg2rad(10.0)
+        self.max_pitch = np.deg2rad(10.0)
+        self.max_yaw_rate = np.deg2rad(60.0)
 
-        # Inner-loop PD gains 
-        self.kp_roll = 4.0
-        self.kd_roll = 0.5
-        self.kp_pitch = 4.0
-        self.kd_pitch = 0.5
-        self.kp_yaw_rate = 0.3
-        self.kd_yaw = 0.05
+        self.kp_roll = 4.0;  self.kd_roll = 0.5
+        self.kp_pitch = 4.0; self.kd_pitch = 0.5
+        self.kp_yaw_rate = 0.3; self.kd_yaw = 0.05
+        self.kp_z = 20.0; self.kd_z = 8.0
 
-        # Altitude (z) PD gains
-        self.kp_z = 20.0   # N/m
-        self.kd_z = 8.0    # N/(m/s)
-
-
-        # Torque saturation (N·m) – tuned for Crazyflie-scale inertia
         self.max_torque = np.array([1e-3, 1e-3, 5e-4], dtype=np.float32)
-
-        # Thrust limits (around hover)
-        # We'll do: thrust = hover_thrust + thrust_cmd * (thrust_delta_scale * hover_thrust)
         self.thrust_delta_scale = 0.4
 
-        # Formation layout (leader + 4 followers)
-        base_offsets = [
-            np.array([0.0, 0.0, 0.0]),    # leader
-            np.array([0.5, -0.5, 0.0]),
-            np.array([0.5,  0.5, 0.0]),
-            np.array([1.0, -0.3, 0.0]),
-            np.array([1.0,  0.3, 0.0]),
-        ]
+        self.formation_layout = "diamond"
+
+        self.cfg = dict(
+            leader_speed_scale = 0.3,
+            spawn_in_formation = True,
+            disable_dynamic    = True,
+            debug_diamond      = False,
+            debug_separation   = False,
+
+            form_w_mean = 1.5,
+            form_w_max  = 0.4,
+            form_var_gain = 0.3,
+            huber_delta   = 0.4,
+
+            alt_w = 0.4,
+            speed_smooth_gain = 0.01,
+
+            formation_spacing = 0.8,
+            min_sep = 0.5,
+            sep_radius = 0.35,
+            sep_gain = 1.5,
+            sep_hysteresis = 0.05,
+            sep_force = 0.8, 
+
+            static_clear_gain = 0.4,
+
+            threat_radius = 1.2,
+            danger_radius = 0.8,
+            safe_radius   = 1.6,
+            evade_gain    = 0.5,
+            avoid_scale   = 3.0,
+            safe_bonus    = 1.0,
+            form_under_threat_gain = 1.4,
+
+            terminate_on_drone_collision = True,
+            collision_penalty = 8.0,
+
+            chase_mode = "nearest",
+            retarget_interval = 1.5,
+            retarget_on_close = True,
+            retarget_close_dist = 0.5,
+            dynamic_aggression = 0.7,
+            debug_target = False,
+            thrust_delta_scale = 0.4,
+            max_roll_de = 10.0,
+            max_pitch_deg = 10.0,
+            max_yaw_rate_deg = 60.0,
+        )
+
+        self._apply_cfg()
+        
+
+        if self.formation_layout == "diamond":
+            r = float(self.cfg["formation_spacing"])
+            base_offsets = [np.array([0.0, 0.0, 0.0], dtype=np.float32)]
+            for a_deg in (0.0, 90.0, 180.0, 270.0):
+                a = np.deg2rad(a_deg)
+                base_offsets.append(np.array([r * np.cos(a), r * np.sin(a), 0.0], dtype=np.float32))
+        else:
+            base_offsets = [
+                np.array([0.0, 0.0, 0.0], dtype=np.float32),
+                np.array([0.6, -0.4, 0.0], dtype=np.float32),
+                np.array([0.6,  0.4, 0.0], dtype=np.float32),
+                np.array([1.2, -0.3, 0.0], dtype=np.float32),
+                np.array([1.2,  0.3, 0.0], dtype=np.float32),
+            ]
+
         if self.num_drones > len(base_offsets):
             raise ValueError(
                 f"Formation offsets only defined for up to {len(base_offsets)} drones; "
@@ -152,433 +157,647 @@ class MultiDroneQuadEnv(gym.Env):
             )
         self.formation_offsets = {i: base_offsets[i] for i in range(self.num_drones)}
 
-        # "Time" for the leader trajectory, in SECONDS
-        self.leader_traj_t = 0.0
+        def _min_pairwise_distance(offsets):
+            dmin = float('inf')
+            for i in range(len(offsets)):
+                for j in range(i+1, len(offsets)):
+                    dmin = min(dmin, float(np.linalg.norm(offsets[i] - offsets[j])))
+            return dmin
 
-        # Handles
-        self.drone_ids = []
-        self.obstacle_ids = []
-        self.dynamic_obstacle_id = None
-        self.dynamic_phase = 0.0
+        min_pair = _min_pairwise_distance([self.formation_offsets[i] for i in range(self.num_drones)])
+        if min_pair < self.cfg["min_sep"] + 0.05:
+            print(f"[WARN] formation spacing {min_pair:.2f} < min_sep+margin {self.cfg['min_sep']+0.05:.2f}. "
+                "Expect separation/collision chatter. Consider spacing↑ or min_sep↓.")
+    def _apply_cfg(self):
+        """Mirror cfg entries to attributes that other methods expect."""
+        for k, v in self.cfg.items():
+            setattr(self, k, v)
 
-    # ------------------------------------------------------------
-    # Leader trajectory (smooth, slow sine-wave)
-    # ------------------------------------------------------------
+        self.max_roll = np.deg2rad(float(self.cfg.get("max_roll_deg", 10.0)))
+        self.max_pitch = np.deg2rad(float(self.cfg.get("max_pitch_deg", 10.0)))
+        self.max_yaw_rate = np.deg2rad(float(self.cfg.get("max_yaw_rate_deg", 60.0)))
+            
+    @staticmethod
+    def _huber(x: np.ndarray, delta: float) -> np.ndarray:
+        """Smooth L1; robust to outliers."""
+        a = np.abs(x)
+        return np.where(a <= delta, 0.5 * (x ** 2), delta * (a - 0.5 * delta))
+
+
     def leader_trajectory(self, t: float) -> np.ndarray:
-        """
-        t is in SECONDS.
-        """
-        x = 0.3 * t     # 0.3 m/s forward
-        y = 0.4 * np.sin(0.4 * t)
+        s = float(self.leader_speed_scale)
+        x = 0.3 * s * t
+        y = 0.4 * np.sin(0.4 * s * t)
         z = self.target_z
         return np.array([x, y, z], dtype=np.float32)
 
-    # ------------------------------------------------------------
-    # RESET
-    # ------------------------------------------------------------
-    def reset(self, *, seed=None, options=None):
-        super().reset(seed=seed)
-        # Pick which drone the dynamic obstacle will chase this episode
-        self.chase_target_drone = np.random.randint(self.num_drones)
 
+    def reset(self, *, seed=None, options=None):
+        
+        super().reset(seed=seed)
+        if seed is not None:
+            self.np_random = np.random.default_rng(seed)
+        else:
+            self.np_random = np.random.default_rng()
+
+        opts = options or {}
+
+        if opts:
+            self.cfg.update({k: v for k, v in opts.items() if k in self.cfg})
+        self._apply_cfg()
+        
+        def _deg_override(opts_key: str, attr_name: str):
+            val = None
+            if opts_key in opts and opts[opts_key] is not None:
+                val = opts[opts_key]
+            elif isinstance(self.cfg, dict) and self.cfg.get(opts_key) is not None:
+                val = self.cfg[opts_key]
+            if val is not None:
+                setattr(self, attr_name, np.deg2rad(float(val)))
+
+        _deg_override("max_roll_deg",       "max_roll")
+        _deg_override("max_pitch_deg",      "max_pitch")
+        _deg_override("max_yaw_rate_deg",   "max_yaw_rate")
+
+        if "thrust_delta_scale" in opts and opts["thrust_delta_scale"] is not None:
+            self.thrust_delta_scale = float(opts["thrust_delta_scale"])
+        elif isinstance(self.cfg, dict) and self.cfg.get("thrust_delta_scale") is not None:
+            self.thrust_delta_scale = float(self.cfg["thrust_delta_scale"])
+
+
+        if "formation_spacing" in opts:
+            if self.formation_layout == "diamond":
+                r = float(self.cfg["formation_spacing"])
+                base_offsets = [np.array([0.0, 0.0, 0.0], dtype=np.float32)]
+                for a_deg in (0.0, 90.0, 180.0, 270.0):
+                    a = np.deg2rad(a_deg)
+                    base_offsets.append(np.array([r * np.cos(a), r * np.sin(a), 0.0], dtype=np.float32))
+            else:
+                base_offsets = [
+                    np.array([0.0, 0.0, 0.0], dtype=np.float32),
+                    np.array([0.6, -0.4, 0.0], dtype=np.float32),
+                    np.array([0.6,  0.4, 0.0], dtype=np.float32),
+                    np.array([1.2, -0.3, 0.0], dtype=np.float32),
+                    np.array([1.2,  0.3, 0.0], dtype=np.float32),
+                ]
+            self.formation_offsets = {i: base_offsets[i] for i in range(self.num_drones)}
 
         self.collision_happened = False
         self.step_count = 0
+        self.leader_traj_t = 0.0
+        self.dynamic_phase = 0.0
+        self._last_retarget_time = 0.0
 
-        # Only reset simulation, not reconnect physics server
         p.resetSimulation()
         p.setGravity(0, 0, -9.81)
         p.setTimeStep(self.time_step)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.loadURDF("plane.urdf")
 
-
-        # Spawn drones + obstacles
         self.drone_ids = self._spawn_drones(self.num_drones)
         self.obstacle_ids = self._spawn_static_obstacles()
-        self.dynamic_obstacle_id = self._spawn_dynamic_obstacle()
-        self.dynamic_phase = 0.0
-        
 
-        
-        # --------------------------------------------
-        # Apply randomized initial conditions
-        # --------------------------------------------
-        if options is not None:
-            # --- Drone position jitter ---
-            if "pos_jitter" in options:
-                for i in range(self.num_drones):
-                    base_pos, base_ori = p.getBasePositionAndOrientation(self.drone_ids[i])
-                    jitter = np.array(options["pos_jitter"][i], dtype=np.float32)
-                    new_pos = np.array(base_pos) + jitter
-                    p.resetBasePositionAndOrientation(self.drone_ids[i], new_pos, base_ori)
-        
-            # --- Drone yaw jitter ---
-            if "yaw_jitter" in options:
-                for i in range(self.num_drones):
-                    _, base_ori = p.getBasePositionAndOrientation(self.drone_ids[i])
-                    yaw = float(options["yaw_jitter"][i])
-                    new_ori = p.getQuaternionFromEuler([0, 0, yaw])
-                    pos, _ = p.getBasePositionAndOrientation(self.drone_ids[i])
-                    p.resetBasePositionAndOrientation(self.drone_ids[i], pos, new_ori)
-        
-            # --- Drone initial velocity jitter ---
-            if "vel_jitter" in options:
-                for i in range(self.num_drones):
-                    vel = np.array(options["vel_jitter"][i], dtype=np.float32)
-                    p.resetBaseVelocity(self.drone_ids[i], vel.tolist(), [0,0,0])
-        
-            # --- Static obstacle jitter ---
-            if "obstacle_jitter" in options:
-                jitter = np.array(options["obstacle_jitter"], dtype=np.float32)
-                for oid in self.obstacle_ids:
-                    pos, ori = p.getBasePositionAndOrientation(oid)
-                    new_pos = np.array(pos) + jitter
-                    p.resetBasePositionAndOrientation(oid, new_pos.tolist(), ori)
-        
-            # --- Dynamic obstacle jitter ---
-            if "dynamic_jitter" in options:
-                pos, ori = p.getBasePositionAndOrientation(self.dynamic_obstacle_id)
-                new_pos = np.array(pos) + np.array(options["dynamic_jitter"], dtype=np.float32)
-                p.resetBasePositionAndOrientation(self.dynamic_obstacle_id, new_pos.tolist(), ori)
+        if self.disable_dynamic:
+            self.dynamic_obstacle_id = None
+        else:
+            self.dynamic_obstacle_id = self._spawn_dynamic_obstacle()
 
+        if "pos_jitter" in opts:
+            for i in range(self.num_drones):
+                base_pos, base_ori = p.getBasePositionAndOrientation(self.drone_ids[i])
+                jitter = np.array(opts["pos_jitter"][i], dtype=np.float32)
+                p.resetBasePositionAndOrientation(self.drone_ids[i], (np.array(base_pos) + jitter).tolist(), base_ori)
 
+        if "yaw_jitter" in opts:
+            for i in range(self.num_drones):
+                yaw = float(opts["yaw_jitter"][i])
+                pos, _ = p.getBasePositionAndOrientation(self.drone_ids[i])
+                p.resetBasePositionAndOrientation(self.drone_ids[i], pos, p.getQuaternionFromEuler([0, 0, yaw]))
 
-        # Reset leader trajectory time
-        self.leader_traj_t = 0.0
+        if "vel_jitter" in opts:
+            for i in range(self.num_drones):
+                vel = np.array(opts["vel_jitter"][i], dtype=np.float32)
+                p.resetBaseVelocity(self.drone_ids[i], vel.tolist(), [0, 0, 0])
 
-        # Use mass from URDF (all drones identical)
+        if "obstacle_jitter" in opts:
+            jitter = np.array(opts["obstacle_jitter"], dtype=np.float32)
+            for oid in self.obstacle_ids:
+                pos, ori = p.getBasePositionAndOrientation(oid)
+                p.resetBasePositionAndOrientation(oid, (np.array(pos) + jitter).tolist(), ori)
+
+        if "dynamic_jitter" in opts and self.dynamic_obstacle_id is not None:
+            pos, ori = p.getBasePositionAndOrientation(self.dynamic_obstacle_id)
+            p.resetBasePositionAndOrientation(
+                self.dynamic_obstacle_id,
+                (np.array(pos) + np.array(opts["dynamic_jitter"], dtype=np.float32)).tolist(),
+                ori,
+            )
+
         dyn_info = p.getDynamicsInfo(self.drone_ids[0], -1)
         self.mass = dyn_info[0]
-        # Initial guess: weight
         self.hover_thrust = self.mass * 9.81
 
-        # --------------------------------------
-        # AUTO-HOVER CALIBRATION
-        # --------------------------------------
-        # Apply constant thrust and see how the leader's altitude drifts,
-        # then adjust hover_thrust so that drift is ~0.
-        calib_steps = 180  # ~0.75s
+        calib_steps = 180
         z0 = None
-        z_last = None
-
         for s in range(calib_steps):
             for i in range(self.num_drones):
                 p.applyExternalForce(
-                    self.drone_ids[i],
-                    -1,
-                    [0.0, 0.0, self.hover_thrust],
-                    [0.0, 0.0, 0.0],
-                    p.WORLD_FRAME,  # purely vertical during calibration
+                    self.drone_ids[i], -1, [0.0, 0.0, self.hover_thrust], [0.0, 0.0, 0.0], p.WORLD_FRAME
                 )
             p.stepSimulation()
-
-            pos0, _ = p.getBasePositionAndOrientation(self.drone_ids[0])
             if s == 0:
-                z0 = pos0[2]
-            z_last = pos0[2]
+                pos0, _ = p.getBasePositionAndOrientation(self.drone_ids[0]); z0 = pos0[2]
+            elif s == calib_steps - 1:
+                posN, _ = p.getBasePositionAndOrientation(self.drone_ids[0])
+                drift = posN[2] - z0
+                T = calib_steps * self.time_step
+                F_correction = 2.0 * self.mass * drift / (T * T)
+                self.hover_thrust = max(self.hover_thrust - F_correction, 0.01)
 
-        if z0 is not None and z_last is not None:
-            drift = z_last - z0  # >0: went up, <0: went down
-            T = calib_steps * self.time_step
-            # From z(t) ≈ 0.5*(F/m - g)*T^2, solve for F correction
-            F_correction = 2.0 * self.mass * drift / (T * T)
-            self.hover_thrust -= F_correction
-            # Safety clamp
-            self.hover_thrust = max(self.hover_thrust, 0.01)
-
-        # After calibration, reset drones back to clean starting pose/vel
         quat0 = p.getQuaternionFromEuler([0, 0, 0])
-        for i in range(self.num_drones):
-            start_pos = np.array([i * 0.3, 0.0, self.target_z], dtype=np.float32)
-            p.resetBasePositionAndOrientation(self.drone_ids[i], start_pos, quat0)
-            p.resetBaseVelocity(self.drone_ids[i], [0, 0, 0], [0, 0, 0])
+        if self.spawn_in_formation:
+            leader_des = self.leader_trajectory(0.0)
+            for i in range(self.num_drones):
+                start_pos = leader_des + self.formation_offsets[i]
+                p.resetBasePositionAndOrientation(self.drone_ids[i], start_pos.tolist(), quat0)
+                p.resetBaseVelocity(self.drone_ids[i], [0, 0, 0], [0, 0, 0])
+        else:
+            for i in range(self.num_drones):
+                start_pos = np.array([i * 0.3, 0.0, self.target_z], dtype=np.float32)
+                p.resetBasePositionAndOrientation(self.drone_ids[i], start_pos, quat0)
+                p.resetBaseVelocity(self.drone_ids[i], [0, 0, 0], [0, 0, 0])
 
-        # --------------------------------------
-        # Hover warm-up: let PD stabilize drones
-        # --------------------------------------
-        warmup_steps = 240  # 1 second
+        self.chase_target_drone = self._pick_chase_target(self.chase_mode)
+
+        warmup_steps = 240
         zero_action = np.zeros((self.num_drones, self.act_per_drone), dtype=np.float32)
         for _ in range(warmup_steps):
             for i in range(self.num_drones):
                 self._apply_action(i, zero_action[i])
             p.stepSimulation()
 
-        # Initial observation
-        obs_all = self._get_all_obs()
-        global_obs = obs_all.flatten().astype(np.float32)
-        return global_obs, {}
-
-    # ------------------------------------------------------------
-    # STEP
-    # ------------------------------------------------------------
-    def step(self, action):
-        action = np.asarray(action, dtype=np.float32).reshape(
-            self.num_drones, self.act_per_drone
+        fine_keys = (
+            "form_w_mean","form_w_max","form_var_gain","form_under_threat_gain","huber_delta",
+            "alt_w","speed_smooth_gain","sep_radius","sep_gain",
+            "static_clear_gain","threat_radius","evade_gain",
+            "danger_radius","safe_radius","avoid_scale","safe_bonus","collision_penalty",
+            "thrust_delta_scale","max_roll_deg","max_pitch_deg","max_yaw_rate_deg",
         )
+        for k in fine_keys:
+            if k in opts:
+                setattr(self, k, float(opts[k]))
 
-        # Apply high-level actions to all drones
+        obs_all = self._get_all_obs()
+        return obs_all.flatten().astype(np.float32), {}
+
+    
+    def _apply_separation_forces(self):
+        """
+        Repel pairs closer than `min_sep` with a smooth radial push + damping.
+        Math:
+        r0 = min_sep          (start of keep-out)
+        r1 = min_sep - hys    (full-strength region)
+        s  = smoothstep((r0 - d)/(r0 - r1)) in [0,1]  (C¹ ramp)
+        F  = (+k * s) along line of centers  -  (c * v_rel_along_line)
+        """
+        n = self.num_drones
+        if n <= 1:
+            return
+
+        r0 = float(self.min_sep)
+        r1 = max(0.05, r0 - float(self.sep_hysteresis))
+
+        pos = np.empty((n, 3), dtype=np.float32)
+        vel = np.empty((n, 3), dtype=np.float32)
+        for i in range(n):
+            p_i, _ = p.getBasePositionAndOrientation(self.drone_ids[i])
+            v_i, _ = p.getBaseVelocity(self.drone_ids[i])
+            pos[i] = np.asarray(p_i, dtype=np.float32)
+            vel[i] = np.asarray(v_i, dtype=np.float32)
+
+        k_push  = float(self.sep_force)
+        c_damp  = 0.5 * k_push
+        f_max   = 2.0 * k_push
+        m_scale = max(0.25, float(self.mass or 1.0))
+
+        def smoothstep(x):
+            x = np.clip(x, 0.0, 1.0)
+            return x * x * (3.0 - 2.0 * x)
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                dvec = pos[i] - pos[j]
+                d    = float(np.linalg.norm(dvec))
+                if d < 1e-8 or d >= r0:
+                    continue
+
+                if d <= r1:
+                    s = 1.0
+                else:
+                    s = smoothstep((r0 - d) / max(1e-8, r0 - r1))
+
+                n_ij = dvec / d
+
+                v_rel = np.dot(vel[i] - vel[j], n_ij)
+
+                f_mag = k_push * s - c_damp * v_rel
+                f_mag = float(np.clip(f_mag, -f_max, f_max))
+
+                Fi = (n_ij * ( f_mag * m_scale)).tolist()
+                Fj = (n_ij * (-f_mag * m_scale)).tolist()
+                p.applyExternalForce(self.drone_ids[i], -1, Fi, [0, 0, 0], p.WORLD_FRAME)
+                p.applyExternalForce(self.drone_ids[j], -1, Fj, [0, 0, 0], p.WORLD_FRAME)
+
+                if getattr(self, "debug_separation", False) and self.gui:
+                    p.addUserDebugLine(pos[i].tolist(), pos[j].tolist(), [1, 0, 0], lifeTime=0.05)
+
+    
+    def _check_collisions(self) -> bool:
+        """
+        Return True if a terminating collision occurred.
+        Extras:
+        - ignores contacts for a short cooldown right after reset (spawn settling)
+        - optional proximity early-out via getClosestPoints margin
+        """
+        if self.step_count < 10:
+            return False
+
+        prox_margin = 0.0
+
+        if self.obstacle_ids:
+            for i in range(self.num_drones):
+                bodyA = self.drone_ids[i]
+
+                for obs in self.obstacle_ids:
+                    if obs is None:
+                        continue
+                    if p.getContactPoints(bodyA, obs):
+                        return True
+                    if prox_margin > 0.0:
+                        if p.getClosestPoints(bodyA, obs, prox_margin):
+                            return True
+
+                if self.dynamic_obstacle_id is not None:
+                    bodyB = self.dynamic_obstacle_id
+                    if p.getContactPoints(bodyA, bodyB):
+                        return True
+                    if prox_margin > 0.0 and p.getClosestPoints(bodyA, bodyB, prox_margin):
+                        return True
+
+        for i in range(self.num_drones):
+            for j in range(i + 1, self.num_drones):
+                if p.getContactPoints(self.drone_ids[i], self.drone_ids[j]):
+                    return bool(self.terminate_on_drone_collision)
+                if prox_margin > 0.0 and p.getClosestPoints(self.drone_ids[i], self.drone_ids[j], prox_margin):
+                    return bool(self.terminate_on_drone_collision)
+
+        return False
+
+    def step(self, action):
+        action = np.asarray(action, dtype=np.float32).reshape(self.num_drones, self.act_per_drone)
+
         for i in range(self.num_drones):
             self._apply_action(i, action[i])
 
-        # Move dynamic obstacle
-        self._update_dynamic_obstacle()
+        self._apply_separation_forces()
 
-        # Advance leader trajectory using *time*
+        if not self.disable_dynamic:
+            self._update_dynamic_obstacle()
+
         self.leader_traj_t += self.time_step
-
-        # Physics step
         p.stepSimulation()
 
         if self.gui:
             self._update_camera()
 
-        # Observation
+        self.collision_happened = self._check_collisions()
+
         obs_all = self._get_all_obs()
         global_obs = obs_all.flatten().astype(np.float32)
 
-        # Rewards
         rewards_all = self._compute_rewards(obs_all)
         team_reward = float(np.mean(rewards_all))
 
-        # Termination / truncation
         self.step_count += 1
         terminated = bool(self.collision_happened)
         truncated = bool(self.step_count >= self.max_steps)
 
-        info = {"per_drone_rewards": rewards_all}
+        info = {
+            "per_drone_rewards": rewards_all,
+            "metrics": self.last_metrics,
+        }
         return global_obs, team_reward, terminated, truncated, info
 
-    # ------------------------------------------------------------
-    # SPAWNING
-    # ------------------------------------------------------------
     def _spawn_drones(self, num: int):
-        ids = []
+        """
+        Drones spawn here but are immediately re-placed in reset().
+        Keep dynamics tame and zero initial velocity for stability.
+        """
+        ids: list[int] = []
+        quat = p.getQuaternionFromEuler([0, 0, 0])
         for i in range(num):
-            start_pos = np.array([i * 0.3, 0.0, self.target_z], dtype=np.float32)
-            drone_id = p.loadURDF(
-                URDF_PATH,
-                start_pos,
-                p.getQuaternionFromEuler([0, 0, 0]),
-            )
-
+            start_pos = [i * 0.3, 0.0, float(self.target_z)]
+            drone_id = p.loadURDF(URDF_PATH, start_pos, quat, useFixedBase=False)
             p.changeDynamics(
-                drone_id,
-                -1,
-                linearDamping=0.05,
-                angularDamping=0.05,
+                drone_id, -1,
+                linearDamping=0.05, angularDamping=0.05,
                 restitution=0.0,
-                lateralFriction=0.8,
-                rollingFriction=0.1,
-                spinningFriction=0.1,
+                lateralFriction=0.8, rollingFriction=0.1, spinningFriction=0.1,
             )
+            p.resetBaseVelocity(drone_id, [0, 0, 0], [0, 0, 0])
             ids.append(drone_id)
         return ids
 
+
     def _spawn_static_obstacles(self):
-        obs_ids = []
-    
-        # Random scale for obstacles for this episode
-        scale = np.random.uniform(0.5, 2.0)
-    
+        """
+        Fixed layout + modest random scale. Keep sizes reasonable for Stage-1 curriculum.
+        """
+        rng = getattr(self, "np_random", None)
+        if rng is None:
+            rng = np.random.default_rng()
+
+        obs_ids: list[int] = []
+        scale = float(rng.uniform(0.8, 1.3))
         positions = [
-            [1.0, 0.0, 0.25],
+            [1.0,  0.0, 0.25],
             [2.0, -1.0, 0.25],
             [2.0,  1.0, 0.25],
             [3.0,  0.0, 0.25],
         ]
-    
         for pos in positions:
             box_id = p.loadURDF(
                 os.path.join(ASSETS_DIR, "cube_small.urdf"),
-                basePosition=pos,
-                baseOrientation=[0, 0, 0, 1],
-                globalScaling=scale,      # <---- scale applied here
-                useFixedBase=True,
+                basePosition=pos, baseOrientation=[0, 0, 0, 1],
+                globalScaling=scale, useFixedBase=True,
             )
             p.changeDynamics(
-                box_id,
-                -1,
+                box_id, -1,
                 restitution=0.0,
-                lateralFriction=0.9,
-                rollingFriction=0.1,
-                spinningFriction=0.1,
+                lateralFriction=0.9, rollingFriction=0.1, spinningFriction=0.1,
             )
             obs_ids.append(box_id)
-    
-        # store scale for logging/MC analysis
         self.last_obstacle_scale = scale
-    
         return obs_ids
 
 
     def _spawn_dynamic_obstacle(self):
-        # -----------------------------
-        # Episode randomization knobs
-        # -----------------------------
-        scale = np.random.uniform(0.5, 1.2)        # a bit smaller to reduce early collisions
-        x0    = np.random.uniform(1.0, 2.5)
-        y0    = np.random.uniform(-0.5, 0.5)
-        z0    = np.random.uniform(0.9, 1.1)        # <-- around target_z = 1.0
+        """
+        Spawn the pursuer at drone altitude, away from drones & leader.
+        Math: sample center in workspace, reject if within d_min of any drone/leader start.
+        """
+        rng = getattr(self, "np_random", None) or np.random.default_rng()
 
-        amp   = np.random.uniform(0.2, 0.8)
-        speed = np.random.uniform(0.02, 0.06)
-        phase = np.random.uniform(0, 2*np.pi)
+        XY_MIN, XY_MAX = np.array([-2.0, -2.0], np.float32), np.array([6.0, 2.0], np.float32)
+        z0 = float(self.target_z)
 
-        self.dynamic_amp = amp
-        self.dynamic_speed = speed
-        self.dynamic_phase = phase
-        self.dynamic_scale = scale
+        d_min_spawn = 0.8
+
+        leader0 = self.leader_trajectory(0.0)
+
+        def _sample_center():
+            x0 = float(rng.uniform(0.8, 2.2))
+            y0 = float(rng.uniform(-0.6, 0.6))
+            return np.array([x0, y0, z0], dtype=np.float32)
+
+        drones_pos = []
+        for did in self.drone_ids:
+            p_i, _ = p.getBasePositionAndOrientation(did)
+            drones_pos.append(np.asarray(p_i, np.float32))
+        drones_pos = np.stack(drones_pos) if len(drones_pos) else np.zeros((0, 3), np.float32)
+
+        center = _sample_center()
+        for _ in range(8):
+            ok = True
+            if drones_pos.size:
+                if np.min(np.linalg.norm(drones_pos - center[None, :], axis=1)) < d_min_spawn:
+                    ok = False
+            if np.linalg.norm(center - leader0) < d_min_spawn:
+                ok = False
+            if ok:
+                break
+            center = _sample_center()
+
+        scale = float(rng.uniform(0.7, 1.0))
+        self.dynamic_scale  = scale
+        self.dynamic_center = center
+        self.dynamic_amp    = float(rng.uniform(0.2, 0.7))
+        self.dynamic_speed  = float(rng.uniform(0.02, 0.05))
+        self.dynamic_phase  = float(rng.uniform(0.0, 2.0 * np.pi))
 
         sphere_id = p.loadURDF(
             os.path.join(ASSETS_DIR, "sphere_small.urdf"),
-            basePosition=[x0, y0, z0],
-            baseOrientation=[0, 0, 0, 1],
-            globalScaling=scale,
-            useFixedBase=False,
+            basePosition=center.tolist(), baseOrientation=[0, 0, 0, 1],
+            globalScaling=scale, useFixedBase=False,
         )
-    
         p.changeDynamics(
-            sphere_id,
-            -1,
-            restitution=0.0,
-            lateralFriction=0.5,
-            linearDamping=0.1,
-            angularDamping=0.1,
+            sphere_id, -1,
+            restitution=0.0, lateralFriction=0.5,
+            linearDamping=0.05, angularDamping=0.05,
         )
-    
+        p.resetBaseVelocity(sphere_id, [0, 0, 0], [0, 0, 0])
+
+        self.chase_target_drone = self._pick_chase_target(self.chase_mode)
+        self._last_retarget_time = self._sim_time()
+
         return sphere_id
 
 
     def _update_dynamic_obstacle(self):
+        """
+        Kinematic pursuit in XY with a bounded velocity field.
+        Math: v_des = v_max * \hat{pursuit} + v_lat, then first-order lag → clamp |v_xy|.
+        """
+        if self.dynamic_obstacle_id is None:
+            return
+
         self.dynamic_phase += self.dynamic_speed
-        osc_y = self.dynamic_amp * np.sin(self.dynamic_phase)
+        y_target = self.dynamic_center[1] + self.dynamic_amp * np.sin(self.dynamic_phase)
 
-        obs_pos, _ = p.getBasePositionAndOrientation(self.dynamic_obstacle_id)
-        obs_pos = np.array(obs_pos, dtype=np.float32)
-
-        # 2. Drone-chasing target position
-        target_pos, _ = p.getBasePositionAndOrientation(
-            self.drone_ids[self.chase_target_drone]
-        )
-        target_pos = np.array(target_pos, dtype=np.float32)
-
-        # Chase direction in full 3D
-        chase_dir = target_pos - obs_pos
-        norm = np.linalg.norm(chase_dir)
-        if norm > 1e-6:
-            chase_dir /= norm
-        else:
-            chase_dir[:] = 0.0
-
-        difficulty = min(1.0, self.step_count / 5000.0)
-        max_speed = 0.3 + 0.7 * difficulty
-        gain = 0.15 + 0.35 * difficulty
-
+        pos, _ = p.getBasePositionAndOrientation(self.dynamic_obstacle_id)
         vel, _ = p.getBaseVelocity(self.dynamic_obstacle_id)
-        vel = np.array(vel, dtype=np.float32)
+        pos = np.asarray(pos, np.float32)
+        vel = np.asarray(vel, np.float32)
 
-        vel_desired = chase_dir * max_speed
-        accel = gain * (vel_desired - vel)
-        dt = self.time_step
-        new_vel = vel + accel * dt
+        now_t = self._sim_time()
+        tgt_id = self.chase_target_drone
+        tgt_pos, _ = p.getBasePositionAndOrientation(self.drone_ids[tgt_id])
+        tgt_pos = np.asarray(tgt_pos, np.float32)
 
-        speed = np.linalg.norm(new_vel)
-        if speed > max_speed:
-            new_vel *= max_speed / (speed + 1e-8)
+        dist_xy = float(np.linalg.norm(pos[:2] - tgt_pos[:2]))
+        time_up = (now_t - self._last_retarget_time) >= float(self.retarget_interval)
+        reached = bool(self.retarget_on_close and (dist_xy <= float(self.retarget_close_dist)))
+        if time_up or reached:
+            self.chase_target_drone = self._pick_chase_target(self.chase_mode)
+            self._last_retarget_time = now_t
+            tgt_pos, _ = p.getBasePositionAndOrientation(self.drone_ids[self.chase_target_drone])
+            tgt_pos = np.asarray(tgt_pos, np.float32)
 
-        # Apply velocity
-        p.resetBaseVelocity(self.dynamic_obstacle_id, new_vel.tolist(), [0, 0, 0])
+        d_xy = tgt_pos - pos
+        d_xy[2] = 0.0
+        n = float(np.linalg.norm(d_xy))
+        dir_xy = (d_xy / n) if n > 1e-6 else np.zeros(3, np.float32)
 
-        # Override only Y with oscillation (centered at current Y)
-        p.resetBasePositionAndOrientation(
-            self.dynamic_obstacle_id,
-            [obs_pos[0], obs_pos[1] + osc_y, obs_pos[2]],
-            [0, 0, 0, 1],
+        aggr = float(self.dynamic_aggression)
+        v_max = 0.5 + 0.7 * aggr
+        k_lag = 0.25 + 0.35 * aggr
+
+        v_des = dir_xy * v_max
+        v_des[1] += 1.0 * (y_target - pos[1])
+        v_des[2] = 0.0
+
+        new_vel = vel + k_lag * (v_des - vel) * self.time_step
+        s_xy = float(np.linalg.norm(new_vel[:2]))
+        if s_xy > v_max:
+            new_vel[:2] *= (v_max / (s_xy + 1e-8))
+        new_vel[2] = 0.0
+
+        pos_next = pos + new_vel * self.time_step
+        pos_next[2] = self.target_z
+        pos_next[0] = float(np.clip(pos_next[0], -2.0, 6.0))
+        pos_next[1] = float(np.clip(pos_next[1], -2.0, 2.0))
+
+        p.resetBasePositionAndOrientation(self.dynamic_obstacle_id, pos_next.tolist(), [0, 0, 0, 1])
+        p.resetBaseVelocity(self.dynamic_obstacle_id, new_vel.tolist(), [0.0, 0.0, 0.0])
+
+        if getattr(self, "debug_target", False) and self.gui:
+            p.addUserDebugLine(pos_next.tolist(), tgt_pos.tolist(), [1, 0, 1], lifeTime=0.1)
+
+    def _sim_time(self) -> float:
+        """Simulation time (s) = step_count * dt."""
+        return float(self.step_count) * float(self.time_step)
+    
+    def _pick_chase_target(self, mode: str = "random") -> int:
+        """
+        Choose which drone to attack. Uses the env RNG (self.np_random) for reproducibility.
+
+        Modes:
+        - "random"      : uniform over all drones, avoiding immediate repeat if possible
+        - "round_robin" : 0,1,2,...,(N-1),0,...
+        - "nearest"     : argmin distance in XY from sphere
+        - "most_error"  : argmax formation slot error ‖pos_i - (leader+offset_i)‖
+        """
+        n = int(self.num_drones)
+        if n <= 1:
+            return 0
+
+        rng = getattr(self, "np_random", None) or np.random.default_rng()
+        mode = (mode or self.chase_mode or "random").lower()
+
+        drone_pos = np.empty((n, 3), dtype=np.float32)
+        for i in range(n):
+            pos_i, _ = p.getBasePositionAndOrientation(self.drone_ids[i])
+            drone_pos[i] = np.asarray(pos_i, dtype=np.float32)
+
+        if self.dynamic_obstacle_id is not None:
+            sph_pos, _ = p.getBasePositionAndOrientation(self.dynamic_obstacle_id)
+            sph_pos = np.asarray(sph_pos, dtype=np.float32)
+        else:
+            sph_pos = self.leader_trajectory(self.leader_traj_t)
+
+        leader_des = self.leader_trajectory(self.leader_traj_t)
+        desired = np.array(
+            [leader_des + self.formation_offsets[i] for i in range(n)],
+            dtype=np.float32,
         )
+        slot_err = np.linalg.norm(drone_pos - desired, axis=1)
+        slot_err = np.nan_to_num(slot_err, nan=0.0, posinf=1e9, neginf=0.0)
 
+        cur = int(getattr(self, "chase_target_drone", -1) or -1)
 
+        if mode == "round_robin":
+            return (cur + 1) % n
+
+        if mode == "nearest":
+            d_xy = np.linalg.norm(drone_pos[:, :2] - sph_pos[None, :2], axis=1)
+            idx = int(np.argmin(d_xy))
+            if idx == cur and n > 1:
+                order = np.argsort(d_xy)
+                for k in order:
+                    if int(k) != cur:
+                        return int(k)
+            return idx
+
+        if mode == "most_error":
+            idx = int(np.argmax(slot_err))
+            if idx == cur and n > 1:
+                order = np.argsort(-slot_err)
+                for k in order:
+                    if int(k) != cur:
+                        return int(k)
+            return idx
+
+        if n > 1:
+            pool = [i for i in range(n) if i != cur] if cur in range(n) else list(range(n))
+            return int(rng.choice(pool))
+        return int(rng.integers(0, n))
 
 
     def _get_all_obs(self) -> np.ndarray:
         """
-        Returns an array of shape (num_drones, per_drone_obs_dim).
         Per-drone obs:
-            [pos (3), vel (3), euler rpy (3), ang_vel (3),
-            neighbors_rel (6*(N-1)),
-            static_obs_rel (3*4),
-            dyn_obs_rel (3),
-            slot_error (3)]
+        [pos(3), vel(3), euler(3), ang_vel(3),
+        neighbors((N-1)*6), static_rel(4*3), dyn_rel(3), slot_error(3)]
+        Notes:
+        - neighbors are ordered by ascending drone index (stable)
+        - static & neighbor rel vectors are softly clipped to avoid extreme outliers
+        - dyn_rel = 0 when dynamic obstacle is disabled (keeps VecNormalize sane)
         """
         all_states = [self._get_state(i) for i in range(self.num_drones)]
 
-        static_states = [
-            np.array(p.getBasePositionAndOrientation(oid)[0], dtype=np.float32)
-            for oid in self.obstacle_ids
-        ]
+        static_states = []
+        for oid in self.obstacle_ids:
+            pos_o, _ = p.getBasePositionAndOrientation(oid)
+            static_states.append(np.array(pos_o, dtype=np.float32))
 
-        dyn_pos = np.array(
-            p.getBasePositionAndOrientation(self.dynamic_obstacle_id)[0],
-            dtype=np.float32,
-        )
+        if self.dynamic_obstacle_id is None:
+            dyn_pos = np.zeros(3, dtype=np.float32)
+            dyn_enabled = False
+        else:
+            dyn_enabled = True
+            dyn_pos = np.array(p.getBasePositionAndOrientation(self.dynamic_obstacle_id)[0], dtype=np.float32)
 
         leader_target = self.leader_trajectory(self.leader_traj_t)
 
-        obs_list = []
+        def _clip_vec(v: np.ndarray, limit: float = 5.0) -> np.ndarray:
+            return np.clip(v, -limit, limit)
 
+        obs_list = []
         for i in range(self.num_drones):
             pos_i, vel_i, euler_i, ang_i = all_states[i]
 
-            # ---------- neighbors_rel ----------
             neighbor_chunks = []
             for j in range(self.num_drones):
                 if i == j:
                     continue
                 pos_j, vel_j, _, _ = all_states[j]
-                neighbor_chunks.append(
-                    np.concatenate([pos_j - pos_i, vel_j - vel_i])
-                )
+                neighbor_chunks.append(_clip_vec(pos_j - pos_i))
+                neighbor_chunks.append(_clip_vec(vel_j - vel_i))
             neighbors = (
                 np.concatenate(neighbor_chunks, dtype=np.float32)
-                if neighbor_chunks
-                else np.zeros(self.neighbor_dim, dtype=np.float32)
+                if neighbor_chunks else np.zeros(self.neighbor_dim, dtype=np.float32)
             )
 
-            # ---------- static_obs_rel ----------
-            static_rel = np.concatenate(
-                [s - pos_i for s in static_states],
-                dtype=np.float32,
-            )
+            if static_states:
+                static_rel = np.concatenate([_clip_vec(s - pos_i) for s in static_states], dtype=np.float32)
+            else:
+                static_rel = np.zeros(self.static_obs_dim, dtype=np.float32)
 
-            # ---------- dyn_obs_rel ----------
-            dyn_rel = dyn_pos - pos_i
+            dyn_rel = (dyn_pos - pos_i) if dyn_enabled else np.zeros(3, dtype=np.float32)
 
-            # ---------- slot_error (desired formation slot for this drone) ----------
             offset = self.formation_offsets.get(i, np.zeros(3, dtype=np.float32))
             desired = leader_target + offset
-            slot_error = desired - pos_i
+            slot_error = _clip_vec(desired - pos_i)
 
-            full_obs = np.concatenate(
-                [
-                    pos_i,
-                    vel_i,
-                    euler_i,
-                    ang_i,
-                    neighbors,
-                    static_rel,
-                    dyn_rel,
-                    slot_error,
-                ]
+            full = np.concatenate(
+                [pos_i, vel_i, euler_i, ang_i, neighbors, static_rel, dyn_rel, slot_error],
+                dtype=np.float32,
             )
+            obs_list.append(full)
 
-            obs_list.append(full_obs.astype(np.float32))
-
-        return np.vstack(obs_list)
+        return np.vstack(obs_list).astype(np.float32)
 
 
-    # ------------------------------------------------------------
-    # STATE
-    # ------------------------------------------------------------
     def _get_state(self, idx: int):
         pos, quat = p.getBasePositionAndOrientation(self.drone_ids[idx])
         vel_lin, vel_ang = p.getBaseVelocity(self.drone_ids[idx])
@@ -588,231 +807,195 @@ class MultiDroneQuadEnv(gym.Env):
         ang = np.array(vel_ang, dtype=np.float32)
 
         euler = np.array(p.getEulerFromQuaternion(quat), dtype=np.float32)
+        euler = (euler + np.pi) % (2.0 * np.pi) - np.pi
 
-        # Clamp linear velocity for stability in obs
-        vnorm = np.linalg.norm(vel)
+        vnorm = float(np.linalg.norm(vel))
         vmax = 5.0
         if vnorm > vmax:
-            vel = vel * (vmax / vnorm)
+            vel *= (vmax / (vnorm + 1e-8))
 
         return pos, vel, euler, ang
 
-    # ------------------------------------------------------------
-    # ACTION → FORCES/TORQUES (PD CONTROL)
-    # ------------------------------------------------------------
+
     def _apply_action(self, drone_idx: int, act_vec: np.ndarray):
-        """
-        act_vec: [roll_cmd, pitch_cmd, yaw_rate_cmd, thrust_cmd] in [-1, 1]
-        """
-        roll_cmd, pitch_cmd, yawrate_cmd, thrust_cmd = act_vec
+        roll_cmd, pitch_cmd, yawrate_cmd, thrust_cmd = np.asarray(act_vec, dtype=np.float32)
 
-        # Desired angles and yaw rate (clamped)
-        roll_des = np.clip(roll_cmd, -1.0, 1.0) * self.max_roll
-        pitch_des = np.clip(pitch_cmd, -1.0, 1.0) * self.max_pitch
-        yaw_rate_des = np.clip(yawrate_cmd, -1.0, 1.0) * self.max_yaw_rate
+        roll_des = float(np.clip(roll_cmd,  -1.0, 1.0)) * float(self.max_roll)
+        pitch_des = float(np.clip(pitch_cmd, -1.0, 1.0)) * float(self.max_pitch)
+        yaw_rate_des = float(np.clip(yawrate_cmd, -1.0, 1.0)) * float(self.max_yaw_rate)
 
-        # Current state
         pos, vel, euler, ang = self._get_state(drone_idx)
-        roll, pitch, yaw = euler
-        wx, wy, wz = ang
+        roll, pitch, yaw = float(euler[0]), float(euler[1]), float(euler[2])
+        wx, wy, wz = float(ang[0]), float(ang[1]), float(ang[2])
 
-        # ----------------------------
-        # Attitude PD (roll, pitch, yaw-rate)
-        # ----------------------------
-        err_roll = roll_des - roll
-        tau_x = self.kp_roll * err_roll - self.kd_roll * wx
-
-        err_pitch = pitch_des - pitch
-        tau_y = self.kp_pitch * err_pitch - self.kd_pitch * wy
-
-        err_yaw_rate = yaw_rate_des - wz
-        tau_z = self.kp_yaw_rate * err_yaw_rate - self.kd_yaw * wz
+        tau_x = self.kp_roll  * (roll_des  - roll)  - self.kd_roll  * wx
+        tau_y = self.kp_pitch * (pitch_des - pitch) - self.kd_pitch * wy
+        tau_z = self.kp_yaw_rate * (yaw_rate_des - wz) - self.kd_yaw * wz
 
         tau = np.array([tau_x, tau_y, tau_z], dtype=np.float32)
         tau = np.clip(tau, -self.max_torque, self.max_torque)
 
-        # ----------------------------
-        # Altitude PD (z)
-        # ----------------------------
-        # Track target_z with a PD on position + vertical velocity.
-        z = pos[2]
-        vz = vel[2]
-        err_z = self.target_z - z
-
-        # PD force along +z (world). This is added on top of hover_thrust.
+        z = float(pos[2]); vz = float(vel[2])
+        err_z = float(self.target_z) - z
         Fz_pd = self.kp_z * err_z - self.kd_z * vz
 
-        # ----------------------------
-        # Collective thrust
-        # ----------------------------
-        # RL thrust_cmd is a *bias* around the altitude PD+hover term.
-        thrust_bias = float(np.clip(thrust_cmd, -1.0, 1.0)) * (
-            self.thrust_delta_scale * self.hover_thrust
-        )
+        thrust_bias = float(np.clip(thrust_cmd, -1.0, 1.0)) * (float(self.thrust_delta_scale) * float(self.hover_thrust))
+        thrust = float(np.clip(float(self.hover_thrust) + Fz_pd + thrust_bias, 0.0, 3.0 * float(self.hover_thrust)))
 
-        thrust = self.hover_thrust + Fz_pd + thrust_bias
+        if not np.isfinite(thrust):
+            thrust = float(self.hover_thrust)
+        if not np.all(np.isfinite(tau)):
+            tau = np.zeros(3, dtype=np.float32)
 
-        # Clip thrust to avoid insane accelerations
-        thrust = float(np.clip(thrust, 0.0, 3.0 * self.hover_thrust))
+        p.applyExternalForce(self.drone_ids[drone_idx], -1, [0.0, 0.0, thrust], [0.0, 0.0, 0.0], p.LINK_FRAME)
+        p.applyExternalTorque(self.drone_ids[drone_idx], -1, tau.tolist(), p.LINK_FRAME)
 
-        # Apply thrust in body frame so tilt → lateral acceleration
-        p.applyExternalForce(
-            self.drone_ids[drone_idx],
-            -1,
-            [0.0, 0.0, thrust],
-            [0.0, 0.0, 0.0],
-            p.LINK_FRAME,
-        )
-
-        p.applyExternalTorque(
-            self.drone_ids[drone_idx],
-            -1,
-            tau.tolist(),
-            p.LINK_FRAME,
-        )
-
-
-    # ------------------------------------------------------------
-    # REWARD
-    # ------------------------------------------------------------
+        
     def _compute_rewards(self, obs_all: np.ndarray):
-        rewards = []
-        self.collision_happened = False
-
-        # --- collision: any drone vs any obstacle ---
-        collision_penalty = 0.0
-        for i in range(self.num_drones):
-            for obs in self.obstacle_ids + [self.dynamic_obstacle_id]:
-                if p.getContactPoints(self.drone_ids[i], obs):
-                    collision_penalty = -5.0
-                    self.collision_happened = True
-                    break
-            if self.collision_happened:
-                break
-
+        """
+        Pure reward: no physics queries. Assumes self.collision_happened was set in step().
+        Math-centric shaping; robust via Huber on formation errors.
+        """
         leader_target = self.leader_trajectory(self.leader_traj_t)
-        dyn_pos = np.array(
-            p.getBasePositionAndOrientation(self.dynamic_obstacle_id)[0],
+
+        positions  = np.array([obs_all[i, 0:3] for i in range(self.num_drones)], dtype=np.float32)
+        velocities = np.array([obs_all[i, 3:6] for i in range(self.num_drones)], dtype=np.float32)
+
+        desired_positions = np.array(
+            [leader_target + self.formation_offsets.get(i, np.zeros(3, dtype=np.float32))
+            for i in range(self.num_drones)],
             dtype=np.float32,
         )
 
-        form_errs = []
-        z_errs = []
-        dyn_dists = []
+        slot_vec  = positions - desired_positions
+        slot_err  = np.linalg.norm(slot_vec, axis=1)
+        h_slot    = self._huber(slot_err, float(self.huber_delta))
 
-        for i in range(self.num_drones):
-            pos = obs_all[i][0:3]
-            vel = obs_all[i][3:6]
-            euler = obs_all[i][6:9]
-            ang = obs_all[i][9:12]
+        mean_form_err = float(np.mean(slot_err))
+        max_form_err  = float(np.max(slot_err))
+        form_var      = float(np.var(slot_err))
 
-            offset = self.formation_offsets.get(i, np.zeros(3, dtype=np.float32))
-            desired = leader_target + offset
+        z_errs = np.abs(positions[:, 2] - float(self.target_z))
+        speeds = np.linalg.norm(velocities, axis=1)
 
-            form_err = np.linalg.norm(pos - desired)
-            form_errs.append(form_err)
-            z_errs.append(abs(pos[2] - self.target_z))
+        sep_pen = 0.0
+        if self.num_drones > 1:
+            sr = float(self.sep_radius)
+            viol = []
+            for i in range(self.num_drones):
+                pi = positions[i]
+                for j in range(i + 1, self.num_drones):
+                    d = float(np.linalg.norm(pi - positions[j]))
+                    if d < sr:
+                        viol.append(sr - d)
+            if viol:
+                sep_pen = -float(self.sep_gain) * float(np.mean(viol))
 
-            d_dyn = np.linalg.norm(dyn_pos - pos)
-            dyn_dists.append(d_dyn)
+        static_pen = 0.0
+        if self.obstacle_ids:
+            inv_d = []
+            for oid in self.obstacle_ids:
+                opos, _ = p.getBasePositionAndOrientation(oid)
+                opos = np.array(opos, dtype=np.float32)
+                d_all = np.linalg.norm(positions - opos[None, :], axis=1)
+                d_clamped = np.clip(d_all, 0.2, 2.0)
+                inv_d.append(np.mean(1.0 / d_clamped))
+            static_pen = -float(self.static_clear_gain) * float(np.mean(inv_d))
 
-        form_errs = np.array(form_errs, dtype=np.float32)
-        dyn_dists = np.array(dyn_dists, dtype=np.float32)
+        r_evade = 0.0
+        r_safe  = 0.0
+        threat  = False
+        min_dyn_dist = float("inf")
 
-        mean_form_err = float(np.mean(form_errs))
-        max_form_err = float(np.max(form_errs))
-        min_dyn_dist = float(np.min(dyn_dists))
+        if self.dynamic_obstacle_id is not None:
+            dyn_pos = np.array(p.getBasePositionAndOrientation(self.dynamic_obstacle_id)[0], dtype=np.float32)
+            dists = np.linalg.norm(positions - dyn_pos[None, :], axis=1)
+            min_dyn_dist = float(np.min(dists))
+            threat = bool(min_dyn_dist <= float(self.threat_radius))
 
-        # --- formation reward (shared across drones) ---
-        # stronger weight so they really care
-        r_form = -2.0 * mean_form_err          # drives mean_form_error < 2
-        r_form -= 0.5 * max_form_err           # punishes one drone drifting out
+            centroid_pos = np.mean(positions,  axis=0)
+            centroid_vel = np.mean(velocities, axis=0)
 
-        # small bonus if tight formation
-        if mean_form_err < 0.5:
-            r_tight = 1.0
-        else:
-            r_tight = 0.0
+            if threat:
+                away = centroid_pos - dyn_pos
+                n = float(np.linalg.norm(away))
+                if n > 1e-6:
+                    away_dir = away / n
+                    prog = float(np.dot(centroid_vel, away_dir))
+                    r_evade = float(self.evade_gain) * max(0.0, prog)
 
-        # --- altitude / attitude penalties (just to keep them reasonable) ---
-        # don't make altitude too dominant (PD already stabilizes)
-        r_height = -0.5 * np.mean(z_errs)
+            if min_dyn_dist < float(self.danger_radius):
+                r_evade += -float(self.avoid_scale) * (float(self.danger_radius) - min_dyn_dist)
+            if (mean_form_err < 0.5) and (min_dyn_dist > float(self.safe_radius)):
+                r_safe = float(self.safe_bonus)
 
-        # (optional) small smoothness term
-        speeds = [np.linalg.norm(obs_all[i][3:6]) for i in range(self.num_drones)]
-        r_smooth = -0.01 * float(np.mean(speeds))
+        r_form     = -float(self.form_w_mean) * float(np.mean(h_slot)) \
+                    -float(self.form_w_max)  * max_form_err
+        r_form_var = -float(self.form_var_gain) * form_var
+        r_height   = -float(self.alt_w)             * float(np.mean(z_errs))
+        r_smooth   = -float(self.speed_smooth_gain) * float(np.mean(speeds))
 
-        # --- team-based obstacle avoidance ---
-        danger_radius = 0.8
-        safe_radius = 1.5
+        if threat:
+            g = float(self.form_under_threat_gain)
+            r_form     *= g
+            r_form_var *= g
+        workspace_pen = 0.0
+        d_xy = np.linalg.norm(positions[:, :2] - leader_target[None, :2], axis=1)
+        excess = np.clip(d_xy - 2.5, 0.0, None)
+        workspace_pen = -0.2 * float(np.mean(excess))
 
-        if min_dyn_dist < danger_radius:
-            # penalize entire team if sphere is close to ANY drone
-            r_avoid = -3.0 * (danger_radius - min_dyn_dist)
-        else:
-            r_avoid = 0.0
 
-        # bonus for staying in formation AND keeping sphere far
-        if (mean_form_err < 0.5) and (min_dyn_dist > safe_radius):
-            r_safe = 1.0
-        else:
-            r_safe = 0.0
+        collision_penalty = -float(getattr(self, "collision_penalty", getattr(self, "collision_penalty_val", 8.0))) \
+                            if self.collision_happened else 0.0
 
-        # shared team reward (each drone gets the same)
         team_reward = (
-            r_form
-            + r_tight
-            + r_height
-            + r_smooth
-            + r_avoid
-            + r_safe
-            + collision_penalty
+            r_form + r_form_var + r_height + r_smooth +
+            r_evade + r_safe + sep_pen + static_pen + workspace_pen +
+            collision_penalty
         )
-
         rewards = [float(team_reward)] * self.num_drones
 
-        # logging
         self.last_metrics = {
-            "mean_form_error": mean_form_err,
-            "mean_z_error": float(np.mean(z_errs)),
+            "mean_form_error":  mean_form_err,
+            "max_form_error":   max_form_err,
+            "form_var":         form_var,
+            "mean_z_error":     float(np.mean(z_errs)),
             "min_dyn_distance": min_dyn_dist,
-            "collision": float(self.collision_happened),
+            "collision":        float(self.collision_happened),
+            "threat":           float(threat),
+            "r_terms": {
+                "r_form":     float(r_form),
+                "r_form_var": float(r_form_var),
+                "r_height":   float(r_height),
+                "r_smooth":   float(r_smooth),
+                "r_evade":    float(r_evade),
+                "r_safe":     float(r_safe),
+                "workspace_pen": float(workspace_pen),
+                "sep_pen":    float(sep_pen),
+                "static_pen": float(static_pen),
+                "collision":  float(collision_penalty),
+            },
         }
-
         return rewards
 
 
 
-    # ------------------------------------------------------------
-    # CAMERA (GUI ONLY)
-    # ------------------------------------------------------------
     def _update_camera(self):
-        if not self.gui:
-            return
-
+        if not self.gui: return
         leader_pos, _ = p.getBasePositionAndOrientation(self.drone_ids[0])
+        p.resetDebugVisualizerCamera(3.0, 35, -30, leader_pos)
+        if self.debug_diamond:
+            for des in self.get_desired_positions():
+                top = (des + np.array([0, 0, 0.25], np.float32)).tolist()
+                p.addUserDebugLine(des.tolist(), top, [0, 1, 0], lifeTime=0.1)
+        if self.debug_separation and self.num_drones > 1:
+            pos = [np.array(p.getBasePositionAndOrientation(iid)[0], np.float32) for iid in self.drone_ids]
+            for i in range(self.num_drones):
+                for j in range(i + 1, self.num_drones):
+                    if np.linalg.norm(pos[i] - pos[j]) < self.min_sep:
+                        p.addUserDebugLine(pos[i].tolist(), pos[j].tolist(), [1, 0, 0], lifeTime=0.1)
 
-        lx, ly, lz = leader_pos
-
-        distance = 3.0
-        yaw = 35
-        pitch = -30
-
-        p.resetDebugVisualizerCamera(
-            cameraDistance=distance,
-            cameraYaw=yaw,
-            cameraPitch=pitch,
-            cameraTargetPosition=[lx, ly, lz],
-        )
-
-    # ------------------------------------------------------------
-    # Formation helpers + close
-    # ------------------------------------------------------------
     def get_desired_positions(self):
-        """
-        Returns an array of shape (num_drones, 3).
-        Each entry = leader_desired_pos + formation_offset[i]
-        """
         leader_des = self.leader_trajectory(self.leader_traj_t)
         return np.array(
             [leader_des + self.formation_offsets[i] for i in range(self.num_drones)],

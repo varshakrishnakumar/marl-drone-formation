@@ -1,58 +1,37 @@
-# sim/envs/callbacks.py
-from typing import Any, Dict, List
+from typing import Dict, Any, List
+import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 
-
-class CustomMetricsCallback(BaseCallback):
+class EnvMetricsLogger(BaseCallback):
     """
-    Logs custom env metrics that are stored on each env as `env.last_metrics`
-    (a dict of scalar values).
-
-    Works with both DummyVecEnv and SubprocVecEnv.
+    Logs env-provided metrics to TensorBoard during training.
+    Looks for 'metrics' in each info dict (per-env) and aggregates per iteration.
     """
-
-    def __init__(self, log_freq: int = 200, verbose: int = 0):
+    def __init__(self, prefix: str = "env", verbose: int = 0):
         super().__init__(verbose)
-        self.log_freq = log_freq
+        self.prefix = prefix
+        self.buf: Dict[str, List[float]] = {}
 
     def _on_step(self) -> bool:
-        # Only log every N callback calls
-        if self.n_calls % self.log_freq != 0:
-            return True
-
-        vec_env = self.training_env
-
-        # ---- grab per-env last_metrics dicts ----
-        metrics_list: List[Dict[str, Any]] = []
-
-        # DummyVecEnv has `.envs`
-        if hasattr(vec_env, "envs"):
-            for env in vec_env.envs:
-                m = getattr(env, "last_metrics", None)
-                if isinstance(m, dict) and m:
-                    metrics_list.append(m)
-        else:
-            # SubprocVecEnv: use get_attr across workers
-            try:
-                attrs = vec_env.get_attr("last_metrics")
-                for m in attrs:
-                    if isinstance(m, dict) and m:
-                        metrics_list.append(m)
-            except Exception:
-                # If anything goes wrong, just skip logging this step
-                return True
-
-        if not metrics_list:
-            # nothing to log
-            return True
-
-        # ---- average each metric across envs ----
-        keys = metrics_list[0].keys()
-        for k in keys:
-            vals = [float(m.get(k, 0.0)) for m in metrics_list if k in m]
-            if not vals:
+        infos = self.locals.get("infos", [])
+        for info in infos:
+            m: Dict[str, Any] = info.get("metrics", {})
+            if not isinstance(m, dict):
                 continue
-            mean_val = sum(vals) / len(vals)
-            self.logger.record(f"custom/{k}", mean_val)
-
+            for k, v in m.items():
+                try:
+                    val = float(v)
+                except Exception:
+                    continue
+                self.buf.setdefault(k, []).append(val)
         return True
+
+    def _on_rollout_end(self) -> None:
+        for k, vals in self.buf.items():
+            arr = np.asarray(vals, dtype=np.float32)
+            if arr.size == 0:
+                continue
+            self.logger.record(f"{self.prefix}/{k}_mean", float(np.nanmean(arr)))
+            self.logger.record(f"{self.prefix}/{k}_p90", float(np.nanpercentile(arr, 90)))
+            self.logger.record(f"{self.prefix}/{k}_min", float(np.nanmin(arr)))
+        self.buf.clear()

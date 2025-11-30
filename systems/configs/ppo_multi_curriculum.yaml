@@ -1,0 +1,149 @@
+common:
+  log_dir: runs/ppo_multi
+  auto_timestamp: true
+  resume_from_prev: true         # stage N resumes from stage N-1
+  n_envs: 8
+  n_steps: 2048
+  n_epochs: 10
+  learning_rate: 0.0003
+  ent_coef: 0.001
+  vf_coef: 1.0
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.2
+  target_kl: 0.03
+  max_grad_norm: 0.5
+  save_every_steps: 327680      # 20 rollouts (20 * 16384)
+  eval_every_steps: 163840 
+  eval_episodes: 5
+
+# STAGE NOTES:
+# - stage0: stationary leader, big spacing, no sphere → learn hover + slot hold safely
+# - stage1: slow leader, static obstacles → track formation w/ mild motion
+# - stage2: enable sphere, low aggression, nearest chase → keep shape + gentle avoid
+# - stage3: faster leader + mixed chase modes → robustness
+# - stage4: hard sphere + tighter spacing, stricter separation → final performance
+
+stages:
+  - name: stage0_warm
+    total_timesteps: 1800000     # +300k to let it settle
+    leader_speed_scale: 0.0
+    spawn_in_formation: true
+    disable_dynamic: true
+    eval_use_train_options: true
+
+    # tighter slot-hold shaping
+    form_w_mean: 3.0             # ↑ from 1.8
+    form_w_max: 0.6              # ↑ from 0.3
+    form_var_gain: 0.35          # ↑ from 0.25
+    alt_w: 0.6                   # ↑ from 0.3
+    huber_delta: 0.3             # ↓ from 0.5 (more sensitive to error)
+
+    # same safety/comfort; keep simple
+    formation_spacing: 0.9
+    min_sep: 0.55
+    sep_gain: 1.2
+    sep_hysteresis: 0.06
+
+    # flight smoothing
+    thrust_delta_scale: 0.15     # ↓ from 0.25 (less throttle inertia)
+    speed_smooth_gain: 0.05      # ↑ from 0.02 (less jitter)
+
+    # stage-local PPO nudges
+    ent_coef: 0.0003             # ↓ from 0.001 for sharper policy
+    target_kl: 0.02              # ↓ from 0.03 to avoid big jumps
+
+
+  - name: stage1_easy
+    total_timesteps: 3000000
+    spawn_in_formation: true
+    leader_speed_scale: 0.3
+    disable_dynamic: true
+    eval_use_train_options: true
+    formation_spacing: 0.85
+    min_sep: 0.55
+    sep_gain: 1.5
+    form_w_mean: 2.0
+    form_w_max: 0.4
+    form_var_gain: 0.3
+    huber_delta: 0.4
+    alt_w: 0.4
+
+  - name: stage2_threat_easy
+    total_timesteps: 3500000
+    spawn_in_formation: true
+    leader_speed_scale: 0.6
+    disable_dynamic: false
+    eval_use_train_options: true
+    # Sphere behavior
+    chase_mode: "nearest"
+    dynamic_aggression: 0.4
+    retarget_interval: 2.5
+    retarget_on_close: true
+    retarget_close_dist: 0.6
+    # Avoidance shaping
+    threat_radius: 1.3
+    danger_radius: 0.8
+    safe_radius: 1.7
+    evade_gain: 0.6
+    avoid_scale: 3.0
+    safe_bonus: 1.0
+    form_under_threat_gain: 1.4
+    # Separation
+    min_sep: 0.55
+    sep_radius: 0.38
+    sep_gain: 1.7
+
+  - name: stage3_threat_mixed
+    total_timesteps: 4000000
+    spawn_in_formation: true
+    leader_speed_scale: 0.8
+    disable_dynamic: false
+    eval_use_train_options: true
+    # Sphere: more assertive + varied targets
+    chase_mode: "random"
+    dynamic_aggression: 0.65
+    retarget_interval: 1.8
+    retarget_on_close: true
+    retarget_close_dist: 0.5
+    # Shaping a bit harsher
+    form_w_mean: 2.2
+    form_w_max: 0.5
+    form_var_gain: 0.35
+    threat_radius: 1.2
+    danger_radius: 0.9
+    safe_radius: 1.8
+    evade_gain: 0.7
+    avoid_scale: 3.2
+    # Separation stricter
+    min_sep: 0.58
+    sep_radius: 0.40
+    sep_gain: 2.0
+
+  - name: stage4_threat_hard
+    total_timesteps: 4500000
+    spawn_in_formation: true
+    leader_speed_scale: 1.0
+    disable_dynamic: false
+    eval_use_train_options: true
+    # Sphere: aggressive + “most_error” to stress the formation
+    chase_mode: "most_error"
+    dynamic_aggression: 0.85
+    retarget_interval: 1.5
+    retarget_on_close: true
+    retarget_close_dist: 0.45
+    # Strongest shaping
+    form_w_mean: 2.4
+    form_w_max: 0.6
+    form_var_gain: 0.4
+    threat_radius: 1.1
+    danger_radius: 1.0
+    safe_radius: 2.0
+    evade_gain: 0.8
+    avoid_scale: 3.5
+    # Tight spacing & strict separation
+    formation_spacing: 0.8
+    min_sep: 0.6
+    sep_radius: 0.42
+    sep_gain: 2.3
+    collision_penalty: 10.0

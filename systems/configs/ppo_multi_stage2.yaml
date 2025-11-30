@@ -1,0 +1,27 @@
+common:
+  log_dir: runs/ppo_multi
+  auto_timestamp: true
+  resume_from_prev: false
+  n_envs: 8
+  n_steps: 2048
+  n_epochs: 10
+  learning_rate: 0.0003
+  ent_coef: 0.001
+  vf_coef: 1.0
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.2
+  target_kl: 0.03
+  max_grad_norm: 0.5
+  save_every_steps: 62500     # ~=500k transitions @ n_envs=8
+  eval_every_steps: 31250      # ~=250k transitions
+
+stages:
+  - name: stage2_threat
+    total_timesteps: 3000000
+    leader_speed_scale: 0.8
+    spawn_in_formation: true
+    disable_dynamic: false      # SPHERE ON
+    eval_use_train_options: true
+    load: runs/ppo_multi/20251129_212108_stage1_easy/checkpoints/best_model.zip
+    load_vecnorm: runs/ppo_multi/20251129_212108_stage1_easy/vecnormalize_final.pkl

@@ -1,160 +1,185 @@
+
 import argparse
-import datetime
-import itertools
-import json
+import os
+import sys
+import yaml
+import shlex
 import subprocess
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+HERE = Path(__file__).resolve().parent
+
+def _resolve(path_like: str | Path) -> str:
+    p = Path(path_like)
+    if p.is_absolute():
+        return str(p)
+    cwd_candidate = (Path.cwd() / p).resolve()
+    return str(cwd_candidate if cwd_candidate.exists() else (HERE / p).resolve())
+
+def _flatten_flags(cfg: Dict[str, Any]) -> List[str]:
+    flags: List[str] = []
+    for k, v in cfg.items():
+        key = f"--{k.replace('_', '-')}"
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            if v:
+                flags.append(key)
+        elif isinstance(v, (list, tuple)):
+            for item in v:
+                flags.extend([key, str(item)])
+        else:
+            flags.extend([key, str(v)])
+    return flags
+
+def _load_yaml(cfg_path: str) -> Dict[str, Any]:
+    with open(cfg_path, "r") as f:
+        return yaml.safe_load(f) or {}
+
+def _merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(base)
+    out.update({k: v for k, v in override.items() if v is not None})
+    return out
+
+def _timestamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+def run_stage(train_script: str, stage_cfg: Dict[str, Any], extra_cli: List[str], env: Dict[str, str]) -> None:
+    flags = _flatten_flags(stage_cfg)
+    cmd = [sys.executable, train_script, *flags, *extra_cli]
+    print("\n[LAUNCH]", " ".join(shlex.quote(c) for c in cmd), flush=True)
+    subprocess.run(cmd, check=True, env=env)
 
 
-# -------------------------------------------------------------------------
-# CURRICULUM DEFINITION
-# -------------------------------------------------------------------------
-CURRICULUM = [
-    # (env_kwargs, timesteps, name, hyperparams)
-    ({"num_drones": 5, "gui": False}, 1_500_000, "stage1_easy", None),
-    ({"num_drones": 5, "gui": False}, 2_500_000, "stage2_full", None),
-    (
-        {"num_drones": 5, "gui": False},
-        4_500_000,
-        "stage3_obstacles",
-        {"learning_rate": 1e-4, "target_kl": 0.04},
-    ),
-]
+def _flatten_flags(cfg: Dict[str, Any]) -> List[str]:
+    """Map a flat dict to CLI flags. Keep underscores to match argparse."""
+    flags: List[str] = []
+    for k, v in cfg.items():
+        key = f"--{k}"
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            if v:
+                flags.append(key)
+        elif isinstance(v, (list, tuple)):
+            for item in v:
+                flags.extend([key, str(item)])
+        else:
+            flags.extend([key, str(v)])
+    return flags
 
-
-# -------------------------------------------------------------------------
-# HYPERPARAMETER SWEEP DEFINITION
-# -------------------------------------------------------------------------
-HYPER_SWEEP = {
-    "learning_rate": [3e-4, 1e-4],
-    "gamma": [0.99, 0.995],
-    "n_steps": [1024, 2048],
-}
-
-
-# -------------------------------------------------------------------------
-def run_command(cmd):
-    print(f"\n===============================")
-    print(f"RUNNING:\n{cmd}")
-    print(f"===============================\n")
-    subprocess.run(cmd, shell=True)
-# -------------------------------------------------------------------------
-
-
-# -------------------------------------------------------------------------
-# CURRICULUM TRAINING
-# -------------------------------------------------------------------------
-def run_curriculum(run_name):
-    print("\n=== STARTING CURRICULUM TRAINING ===\n")
-
-    prev_model = None
-
-    for stage in CURRICULUM:
-        env_kwargs, timesteps, tag, hyper = stage
-
-        stage_name = f"{run_name}_{tag}"
-
-        cmd = f"python rl/train_multi.py " \
-              f"--run-name {stage_name} " \
-              f"--timesteps {timesteps} " \
-              f"--num-drones {env_kwargs['num_drones']} "
-
-        if hyper:
-            hp_json = json.dumps(hyper)
-            cmd += f"--hyper '{hp_json}' "
-
-        if prev_model:
-            cmd += f"--load-model {prev_model} "
-
-        run_command(cmd)
-
-        # After training stage: save for next stage
-        prev_model = f"models/{stage_name}/ppo_final_model"
-
-    print("\n=== CURRICULUM FINISHED ===\n")
-    return prev_model  # final model path
-
-
-# -------------------------------------------------------------------------
-# SWEEP STARTING FROM A MODEL
-# -------------------------------------------------------------------------
-def run_hyper_sweep(run_name, base_model):
-    print("\n=== STARTING HYPERPARAMETER SWEEP ===\n")
-
-    keys = list(HYPER_SWEEP.keys())
-    values = list(HYPER_SWEEP.values())
-
-    for combo in itertools.product(*values):
-        hp = dict(zip(keys, combo))
-
-        tag = "_".join([f"{k}{v}" for k, v in hp.items()])
-        exp_name = f"{run_name}_sweep_{tag}"
-        hp_json = json.dumps(hp)
-
-        cmd = (
-            f"python rl/train_multi.py "
-            f"--run-name {exp_name} "
-            f"--timesteps 150000 "
-            f"--num-drones 5 "
-            f"--hyper '{hp_json}' "
-            f"--load-model {base_model}"
-        )
-
-        run_command(cmd)
-
-    print("\n=== SWEEP FINISHED ===\n")
-
-
-# -------------------------------------------------------------------------
-# ALL (curriculum → sweep)
-# -------------------------------------------------------------------------
-def run_all(run_name):
-    print("\n=== BEGIN FULL PIPELINE (CURRICULUM → SWEEP) ===\n")
-
-    final_model = run_curriculum(run_name)
-
-    print(f"\n>>> Curriculum final model: {final_model}\n")
-
-    run_hyper_sweep(run_name, final_model)
-
-    print("\n=== FULL PIPELINE COMPLETED ===\n")
-
-
-# -------------------------------------------------------------------------
-def parse_args():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--run-name", type=str, default=None,
-                        help="Base name for run folders.")
-
-    parser.add_argument("--curriculum", action="store_true",
-                        help="Run curriculum training.")
-
-    parser.add_argument("--sweep", action="store_true",
-                        help="Run hyperparameter sweep only.")
-
-    parser.add_argument("--all", action="store_true",
-                        help="Run curriculum then hyperparameter sweep.")
-
-    return parser.parse_args()
-
-
-# -------------------------------------------------------------------------
 def main():
-    args = parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", type=str, default="systems/ppo_multi.yaml")
+    ap.add_argument("--train_script", type=str, default="train_multi.py")
+    ap.add_argument("--extra", nargs=argparse.REMAINDER, help="CLI overrides appended to each stage")
+    ap.add_argument("--dry_run", action="store_true")
+    args = ap.parse_args()
 
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = args.run_name or f"run_{timestamp}"
+    cfg_path = _resolve(args.config)
+    train_script = _resolve(args.train_script)
+    if not Path(cfg_path).exists():
+        raise FileNotFoundError(f"Config not found: {cfg_path}")
+    if not Path(train_script).exists():
+        raise FileNotFoundError(f"Train script not found: {train_script}")
 
-    if args.all:
-        run_all(run_name)
-    elif args.curriculum:
-        run_curriculum(run_name)
-    elif args.sweep:
-        print("ERROR: --sweep requires a base model. Use --all or curriculum first.")
+    base_cfg = _load_yaml(cfg_path)
+
+    env = os.environ.copy()
+    env_cfg = base_cfg.get("env")
+    if isinstance(env_cfg, dict):
+        for k, v in env_cfg.items():
+            env[str(k)] = str(v)
+
+    stages: List[Tuple[str, Dict[str, Any]]] = []
+    if "stages" in base_cfg:
+        common = base_cfg.get("common", {})
+        for i, st in enumerate(base_cfg["stages"]):
+            name = st.get("name", f"stage{i+1}")
+            merged = _merge(common, {k: v for k, v in st.items() if k != "name"})
+            stages.append((name, merged))
     else:
-        print("You must choose one: --curriculum | --sweep | --all")
+        stages.append(("stage", base_cfg))
+
+    extra_cli = args.extra or []
+
+    prev_log_dir: str | None = None
+    for idx, (stage_name, scfg) in enumerate(stages, start=1):
+        log_dir = scfg.get("log_dir", "runs/ppo_multi")
+        auto_ts = bool(scfg.pop("auto_timestamp", True))
+        resume_from_prev = bool(scfg.pop("resume_from_prev", idx > 1))
+
+        if auto_ts:
+            log_dir = str(Path(log_dir) / f"{_timestamp()}_{stage_name}")
+        scfg["log_dir"] = log_dir
+
+        if resume_from_prev and prev_log_dir:
+            scfg["load_latest"] = True
+            vecnorm_path = Path(prev_log_dir) / "vecnormalize_final.pkl"
+            ck = Path(prev_log_dir) / "checkpoints"
+            best = ck / "best_by_mfe.zip"
+            if not best.exists():
+                best = ck / "best_model.zip"
+            scfg["load"] = str(best) if best.exists() else None
+            scfg.pop("load_latest", None)
+
+            vec = Path(prev_log_dir) / "vecnormalize_final.pkl"
+            if vec.exists():
+                scfg["load_vecnorm"] = str(vec)
+
+        for key in ("load", "load_vecnorm"):
+            if key in scfg:
+                scfg[key] = _resolve(scfg[key])
+
+        if "cuda_visible_devices" in scfg:
+            env["CUDA_VISIBLE_DEVICES"] = str(scfg.pop("cuda_visible_devices"))
+
+        print(f"\n=== Stage {idx}: {stage_name} ===")
+        print(f"config: {cfg_path}")
+        print(f"train_script: {train_script}")
+        print(f"log_dir: {log_dir}")
+        if scfg.get("load_latest", False):
+            print("resume: --load_latest (from previous stage)")
+        
+        if resume_from_prev and prev_log_dir:
+            ckpt_dir = Path(prev_log_dir) / "checkpoints"
+
+            load_path = None
+            for name in ("best_by_mfe.zip", "best_model.zip"):
+                p = ckpt_dir / name
+                if p.exists():
+                    load_path = p
+                    break
+            if load_path is None:
+                steps_zips = sorted(ckpt_dir.glob("ppo_multi_*_steps.zip"))
+                if steps_zips:
+                    load_path = steps_zips[-1]
+
+            if load_path:
+                scfg["load"] = str(load_path)
+                print(f"resume: --load {load_path}")
+            else:
+                print("[WARN] No checkpoint in previous stage; starting fresh.")
+
+            for v in [
+                Path(prev_log_dir) / "vecnormalize_final.pkl",
+                ckpt_dir / "vecnormalize_final.pkl",
+            ]:
+                if v.exists():
+                    scfg["load_vecnorm"] = str(v)
+                    break
 
 
-# -------------------------------------------------------------------------
+        if args.dry_run:
+            print("[DRY RUN] Flags:", " ".join(_flatten_flags(scfg)))
+        else:
+            run_stage(train_script, scfg, extra_cli, env)
+
+        prev_log_dir = log_dir
+
+    print("\n[OK] All stages finished.")
+
 if __name__ == "__main__":
     main()

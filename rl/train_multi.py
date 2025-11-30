@@ -1,237 +1,439 @@
-import argparse
-import datetime
+from __future__ import annotations
+
 import os
-
-import gymnasium as gym
+import re
+import sys
+import yaml
+import signal
+import argparse
+from glob import glob
+from typing import Any, Dict, Optional
+import numpy as np
 import torch
-
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
-from stable_baselines3.common.vec_env.vec_normalize import VecNormalize
-from stable_baselines3.common.callbacks import CheckpointCallback
-from stable_baselines3.common.logger import configure
-from stable_baselines3.common.utils import get_schedule_fn
-from stable_baselines3.common.buffers import RolloutBuffer
-
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.utils import set_random_seed
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+import gymnasium as gym
 from sim.envs.multi_drone_quad_env import MultiDroneQuadEnv
-from sim.envs.callbacks import CustomMetricsCallback
-from stable_baselines3.common.buffers import RolloutBuffer
+import time
+from collections import deque
+from stable_baselines3.common.callbacks import BaseCallback
 
 
-# -----------------------------------------------------------------------------
-# Environment factory
-# -----------------------------------------------------------------------------
-def make_env(num_drones=5, gui=False, seed_offset=0):
-    def _init():
-        env = MultiDroneQuadEnv(num_drones=num_drones, gui=gui)
-        env.reset(seed=seed_offset)
+
+class ResetOptionsWrapper(gym.Wrapper):
+    """Injects reset(options=...) on every env.reset(). Why: enforce stage options reliably across resets."""
+    def __init__(self, env: gym.Env, options: dict):
+        super().__init__(env)
+        self._opt = options or {}
+    def reset(self, **kwargs):
+        kwargs["options"] = {**self._opt, **kwargs.get("options", {})}
+        return self.env.reset(**kwargs)
+
+
+def make_env(
+    seed: int,
+    gui: bool = False,
+    *,
+    num_drones: int = 5,
+    max_steps: int = 3000,
+    leader_speed_scale: float = 0.8,
+    spawn_in_formation: bool = True,
+    disable_dynamic: bool = False,
+    **env_overrides,
+):
+    def _thunk():
+        base = MultiDroneQuadEnv(num_drones=num_drones, gui=gui, max_steps=max_steps)
+
+        eval_opts = dict(
+            leader_speed_scale=leader_speed_scale,
+            spawn_in_formation=spawn_in_formation,
+            disable_dynamic=disable_dynamic,
+            debug_diamond=False,
+        )
+
+        for k, v in env_overrides.items():
+            if v is not None:
+                eval_opts[k] = v
+
+        env = ResetOptionsWrapper(base, eval_opts)
+        env = Monitor(env)
+        env.reset(seed=seed)
         return env
-    return _init
+
+    return _thunk
 
 
-# -----------------------------------------------------------------------------
-# Argument parsing
-# -----------------------------------------------------------------------------
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Training script for MultiDroneQuadEnv (Multi-Drone Formation + Obstacle Avoidance)"
-    )
-
-    parser.add_argument("--timesteps", type=int, default=1_000_000,
-                        help="Total PPO training timesteps.")
-
-    parser.add_argument("--num-drones", type=int, default=5,
-                        help="Number of drones.")
-
-    parser.add_argument("--n-envs", type=int, default=4,
-                        help="Number of parallel environments. "
-                             "Use 1 on macOS; use 4-16 on Linux for speed.")
-
-    parser.add_argument("--run-name", type=str, default=None,
-                        help="Optional name for logging/model directories.")
-
-    parser.add_argument("--normalize", action="store_true",
-                        help="Use VecNormalize (recommended for PPO).")
-    parser.add_argument("--load-model", type=str, default=None,
-                        help="Path to a previous PPO model to continue training.")
-
-    parser.add_argument("--learning-rate", type=float, default=None,
-                        help="Override the PPO learning rate (float).")
-
-    parser.add_argument(
-        "--target-kl",
-        type=float,
-        default=None,
-        help=("Optional KL threshold for early stopping. "
-              "Increase to reduce clipping or set to 0 to disable."),
-    )
-
-    parser.add_argument("--hyper", type=str, default=None,
-                        help="JSON string with hyperparameter overrides.")
 
 
-    return parser.parse_args()
+def save_config(path: str, cfg: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        yaml.safe_dump(cfg, f)
 
 
-# -----------------------------------------------------------------------------
-# Main training logic
-# -----------------------------------------------------------------------------
+def find_latest_checkpoint(dir_path: str) -> Optional[str]:
+    candidates = glob(os.path.join(dir_path, "ppo_multi_*_steps.zip"))
+    if not candidates:
+        return None
+    def steps(p: str) -> int:
+        m = re.search(r"_(\d+)_steps\.zip$", p)
+        return int(m.group(1)) if m else -1
+    candidates.sort(key=steps)
+    return candidates[-1]
+
+
+def attach_eval_env(
+    train_vec: VecNormalize,
+    gamma: float,
+    *,
+    use_train_options: bool = True,
+    leader_speed_scale: float = 0.3,
+    spawn_in_formation: bool = True,
+    disable_dynamic: bool = True,
+    env_overrides: Optional[Dict[str, Any]] = None,
+) -> VecNormalize:
+    env_overrides = env_overrides or {}
+    if use_train_options:
+        thunk = make_env(
+            seed=10_000,
+            gui=False,
+            leader_speed_scale=leader_speed_scale,
+            spawn_in_formation=spawn_in_formation,
+            disable_dynamic=disable_dynamic,
+            **env_overrides,
+        )
+    else:
+        thunk = make_env(seed=10_000, gui=False)
+
+    eval_env = SubprocVecEnv([thunk])
+    eval_vec = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0, gamma=gamma)
+    eval_vec.obs_rms = train_vec.obs_rms
+    eval_vec.training = False
+    return eval_vec
+
+
+
+def graceful_save(model: PPO, vec: VecNormalize, out_dir: str, name: str = "final") -> None:
+    os.makedirs(out_dir, exist_ok=True)
+    model.save(os.path.join(out_dir, f"{name}_model"))
+    vec.save(os.path.join(out_dir, f"vecnormalize_{name}.pkl"))
+    print(f"[INFO] Saved model+vecnorm to {out_dir} ({name}).", flush=True)
+
+class ProgressLoggerCallback(BaseCallback):
+    """
+    Prints a simple progress bar and rolling metrics pulled from env `infos`.
+    Also logs scalars to TensorBoard under `train/*`.
+    """
+    def __init__(self, total_timesteps: int, log_every: int = 10000, window: int = 5000, verbose: int = 1):
+        super().__init__(verbose)
+        self.total_timesteps = int(total_timesteps)
+        self.log_every = int(log_every)
+        self.window = int(window)
+        self._last_log = 0
+        self._t0 = time.time()
+        self._mfe = deque(maxlen=window)
+        self._mdd = deque(maxlen=window)
+        self._col = deque(maxlen=window)
+        self._rew = deque(maxlen=window)
+
+    def _on_step(self) -> bool:
+        rewards = self.locals.get("rewards", None)
+        if rewards is not None:
+            for r in np.atleast_1d(rewards):
+                self._rew.append(float(r))
+
+        infos = self.locals.get("infos", [])
+        for info in infos or []:
+            m = info.get("metrics", {})
+            if "mean_form_error" in m:
+                self._mfe.append(float(m["mean_form_error"]))
+            if "min_dyn_distance" in m:
+                self._mdd.append(float(m["min_dyn_distance"]))
+            if "collision" in m:
+                self._col.append(float(m["collision"]))
+
+        steps = int(self.model.num_timesteps)
+        if steps - self._last_log >= self.log_every:
+            self._last_log = steps
+            pct = steps / max(1, self.total_timesteps)
+            bar_len = 28
+            filled = int(bar_len * pct)
+            bar = "[" + "#" * filled + "-" * (bar_len - filled) + "]"
+
+            mean_rew = np.mean(self._rew) if len(self._rew) else float("nan")
+            mean_mfe = np.mean(self._mfe) if len(self._mfe) else float("nan")
+            mean_mdd = np.mean(self._mdd) if len(self._mdd) else float("nan")
+            col_rate = np.mean(self._col) if len(self._col) else float("nan")
+
+            elapsed = time.time() - self._t0
+            msg = (
+                f"{bar} {pct:5.1%}  "
+                f"steps={steps:,}  "
+                f"r≈{mean_rew: .3f}  "
+                f"mfe≈{mean_mfe: .3f}  "
+                f"mdd≈{mean_mdd: .3f}  "
+                f"coll_rate≈{col_rate: .3f}  "
+                f"t={elapsed:,.0f}s"
+            )
+            print(msg, flush=True)
+
+            self.logger.record("train/progress_percent", pct)
+            if len(self._rew): self.logger.record("train/roll_reward_mean", float(mean_rew))
+            if len(self._mfe): self.logger.record("train/mfe_mean_roll", float(mean_mfe))
+            if len(self._mdd): self.logger.record("train/min_dyn_dist_roll", float(mean_mdd))
+            if len(self._col): self.logger.record("train/collision_rate_roll", float(col_rate))
+        return True
+    
+class PeriodicSaveCallback(BaseCallback):
+    """Hard-save model + vecnorm every `freq` timesteps, independent of EvalCallback."""
+    def __init__(self, freq: int, save_dir: str, vecnorm: VecNormalize, prefix: str = "ppo_multi", verbose: int = 1):
+        super().__init__(verbose)
+        self.freq = int(freq)
+        self.save_dir = save_dir
+        self.vecnorm = vecnorm
+        self.prefix = prefix
+        self._last = 0
+        os.makedirs(self.save_dir, exist_ok=True)
+
+    def _on_step(self) -> bool:
+        if self.freq <= 0:
+            return True
+        if (self.num_timesteps - self._last) >= self.freq:
+            steps = int(self.num_timesteps)
+            model_path = os.path.join(self.save_dir, f"{self.prefix}_{steps}_steps.zip")
+            vec_path   = os.path.join(self.save_dir, f"{self.prefix}_vecnormalize_{steps}_steps.pkl")
+            try:
+                self.model.save(model_path)
+                self.vecnorm.save(vec_path)
+                print(f"[SAVE] checkpoint @ {steps:,} → {model_path}", flush=True)
+            except Exception as e:
+                print(f"[WARN] periodic save failed at {steps:,}: {e}", flush=True)
+            self._last = steps
+        return True
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+
+    p.add_argument("--log_dir", type=str, default="runs/ppo_multi")
+    p.add_argument("--total_timesteps", type=int, default=4_000_000)
+    p.add_argument("--n_envs", type=int, default=8)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--gui", action="store_true")
+    p.add_argument("--start_method", type=str, default="forkserver",
+                   choices=["fork", "forkserver", "spawn"])
+
+    p.add_argument("--n_steps", type=int, default=2048)
+    p.add_argument("--n_epochs", type=int, default=10)
+    p.add_argument("--learning_rate", type=float, default=3e-4)
+    p.add_argument("--ent_coef", type=float, default=1e-3)
+    p.add_argument("--vf_coef", type=float, default=1.0)
+    p.add_argument("--gamma", type=float, default=0.995)
+    p.add_argument("--gae_lambda", type=float, default=0.95)
+    p.add_argument("--clip_range", type=float, default=0.2)
+    p.add_argument("--target_kl", type=float, default=0.03)
+    p.add_argument("--max_grad_norm", type=float, default=0.5)
+
+    p.add_argument("--progress_log_every", type=int, default=10000,
+                   help="Print progress/metrics every N env steps.")
+
+    p.add_argument("--save_every_steps", type=int, default=500_000)
+    p.add_argument("--eval_every_steps", type=int, default=250_000)
+    p.add_argument("--eval_episodes", type=int, default=5)
+
+    p.add_argument("--load", type=str, default="")
+    p.add_argument("--load_latest", action="store_true")
+    p.add_argument("--load_vecnorm", type=str, default="")
+
+    p.add_argument("--leader_speed_scale", type=float, default=0.3,
+                   help="Leader trajectory speed scale (0 freezes).")
+    p.add_argument("--spawn_in_formation", action="store_true",
+                   help="Spawn drones at formation slots on reset.")
+    p.add_argument("--disable_dynamic", action="store_true",
+                   help="Disable chasing sphere during training.")
+    p.add_argument("--eval_use_train_options", action="store_true",
+                   help="Evaluate with the same reset options used in training.")
+
+    args, unknown = p.parse_known_args()
+
+    passthrough = {}
+    it = iter(unknown)
+    for tok in it:
+        if not tok.startswith("--"):
+            continue
+        key = tok[2:]
+        peek = next(it, None)
+        if peek is None or peek.startswith("--"):
+            passthrough[key] = True
+            if peek is not None:
+                it = (v for v in ([peek] + list(it)))
+        else:
+            try:
+                passthrough[key] = float(peek)
+            except ValueError:
+                if isinstance(peek, str) and peek.lower() in ("true", "false"):
+                    passthrough[key] = (peek.lower() == "true")
+                else:
+                    passthrough[key] = peek
+
+    args.passthrough = passthrough
+    return args
+
+
+
+
 def main():
     args = parse_args()
+    set_random_seed(args.seed)
 
-    import json
-
-    # Apply hyperparameter overrides
-    hyperparams = {}
-    if args.hyper:
-        hyperparams = json.loads(args.hyper)
-        print("Applying hyperparameter overrides:", hyperparams)
-
-
-    # -------------------------------------------------------------------------
-    # Paths
-    # -------------------------------------------------------------------------
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = args.run_name or f"marl_run_{timestamp}"
-
-    log_dir = os.path.join("logs", run_name)
-    models_dir = os.path.join("models", run_name)
-    os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(models_dir, exist_ok=True)
-
-    # -------------------------------------------------------------------------
-    # Build vectorized training environment
-    # -------------------------------------------------------------------------
-    print(f"\nCreating {args.n_envs} training environments...")
-
-    if args.n_envs == 1:
-        env_fns = [make_env(args.num_drones, gui=False)]
-        vec_env = DummyVecEnv(env_fns)
-    else:
-        env_fns = [make_env(args.num_drones, gui=False, seed_offset=i)
-                   for i in range(args.n_envs)]
-        vec_env = SubprocVecEnv(env_fns)
-
-    # Optional normalization
-    if args.normalize:
-        vec_env = VecNormalize(
-            vec_env,
-            norm_obs=True,
-            norm_reward=True,
-            clip_obs=10.0,
-            clip_reward=10.0
-        )
-        print("Using VecNormalize.")
-
-    # -------------------------------------------------------------------------
-    # PPO Model (tuned for drone dynamics)
-    # -------------------------------------------------------------------------
-    print("Initializing PPO model...\n")
-
-    target_kl_override = hyperparams.get("target_kl", args.target_kl)
-    if target_kl_override is not None and target_kl_override <= 0:
-        target_kl_override = None
-
-    learning_rate = hyperparams.get(
-        "learning_rate",
-        args.learning_rate if args.learning_rate is not None else 2.5e-4,
+    os.makedirs(args.log_dir, exist_ok=True)
+    ckpt_dir = os.path.join(args.log_dir, "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    env_kwargs = dict(
+        leader_speed_scale=args.leader_speed_scale,
+        spawn_in_formation=args.spawn_in_formation,
+        disable_dynamic=args.disable_dynamic,
+        **args.passthrough,
     )
 
-    logger = configure(log_dir, ["stdout", "csv", "tensorboard"])
+    env_kwargs.update(getattr(args, "passthrough", {}))
 
-    if args.load_model:
-        print(f"Loading previous model: {args.load_model}")
-        model = PPO.load(args.load_model, env=vec_env)
-        model.set_logger(logger)
 
-        if target_kl_override is not None:
-            model.target_kl = target_kl_override
+    thunks = [
+        make_env(
+            seed=args.seed + i,
+            gui=(args.gui and i == 0),
+            **env_kwargs,
+        )
+        for i in range(args.n_envs)
+    ]
+    vec = SubprocVecEnv(thunks, start_method=args.start_method)
+    vec = VecNormalize(vec, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=args.gamma)
 
-        if learning_rate is not None:
-            model.learning_rate = learning_rate
-            model.lr_schedule = get_schedule_fn(model.learning_rate)
+    if args.load_vecnorm and os.path.isfile(args.load_vecnorm):
+        try:
+            loaded_vec = VecNormalize.load(args.load_vecnorm, vec)
+            vec.obs_rms = loaded_vec.obs_rms
+            vec.ret_rms = loaded_vec.ret_rms
+            print(f"[INFO] Loaded VecNormalize stats from {args.load_vecnorm}", flush=True)
+        except Exception as e:
+            print(f"[WARN] Could not load VecNormalize from {args.load_vecnorm}: {e}", flush=True)
 
-        buffer_reset_needed = False
+    n_steps_per_env = int(args.n_steps)
+    if n_steps_per_env <= 0:
+        raise ValueError("--n_steps must be > 0")
+    total_rollout = n_steps_per_env * args.n_envs
+    batch_size = max(1024, total_rollout // 4)
 
-        if "gamma" in hyperparams:
-            model.gamma = hyperparams["gamma"]
-            buffer_reset_needed = True
-        if "n_steps" in hyperparams:
-            model.n_steps = hyperparams["n_steps"]
-            buffer_reset_needed = True
+    policy_kwargs: Dict[str, Any] = dict(
+        net_arch=[256, 256],
+        activation_fn=torch.nn.Tanh,
+        ortho_init=True,
+    )
 
-        if buffer_reset_needed:
-            model.rollout_buffer = RolloutBuffer(
-                model.n_steps,
-                model.observation_space,
-                model.action_space,
-                model.device,
-                gae_lambda=model.gae_lambda,
-                gamma=model.gamma,
-                n_envs=model.n_envs,
-            )
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    model: PPO
+    load_path = args.load
+    if args.load_latest:
+        latest = find_latest_checkpoint(ckpt_dir)
+        if latest:
+            load_path = latest
+            print(f"[INFO] --load_latest resolved to: {load_path}", flush=True)
+        else:
+            print("[WARN] --load_latest requested but no checkpoints found; starting fresh.", flush=True)
+
+    if load_path:
+        print(f"[INFO] Loading PPO from {load_path}", flush=True)
+        model = PPO.load(load_path, env=vec, device=device)
+        model.set_env(vec)
     else:
         model = PPO(
             policy="MlpPolicy",
-            env=vec_env,
-            learning_rate=learning_rate,
-            n_steps=hyperparams.get("n_steps", 2048 // args.n_envs),
-            gamma=hyperparams.get("gamma", 0.995),
-            batch_size=128,
-            n_epochs=10,
-            gae_lambda=0.95,
-            clip_range=0.2,
-            ent_coef=0.01,
-            vf_coef=0.5,
-            max_grad_norm=0.5,
-            tensorboard_log=log_dir,
+            env=vec,
+            learning_rate=args.learning_rate,
+            n_steps=n_steps_per_env,
+            batch_size=batch_size,
+            n_epochs=args.n_epochs,
+            gamma=args.gamma,
+            gae_lambda=args.gae_lambda,
+            clip_range=args.clip_range,
+            ent_coef=args.ent_coef,
+            vf_coef=args.vf_coef,
+            max_grad_norm=args.max_grad_norm,
+            target_kl=args.target_kl,
+            tensorboard_log=args.log_dir,
             verbose=1,
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            target_kl=target_kl_override,
+            policy_kwargs=policy_kwargs,
+            device=device,
         )
-        model.set_logger(logger)
 
-    # -------------------------------------------------------------------------
-    # Callbacks
-    # -------------------------------------------------------------------------
-    checkpoint_callback = CheckpointCallback(
-        save_freq=100_000,
-        save_path=models_dir,
-        name_prefix="checkpoint",
+    checkpoint_cb = CheckpointCallback(
+        save_freq=args.save_every_steps,
+        save_path=ckpt_dir,
+        name_prefix="ppo_multi",
         save_replay_buffer=False,
         save_vecnormalize=True,
     )
 
-    metrics_callback = CustomMetricsCallback(log_freq=200)
-
-    # -------------------------------------------------------------------------
-    # Train!
-    # -------------------------------------------------------------------------
-    print(f"Starting PPO training for {args.timesteps:,} timesteps...")
-    print(f"Logs → {log_dir}")
-    print(f"Models → {models_dir}\n")
-
-    model.learn(
-        total_timesteps=args.timesteps,
-        callback=[checkpoint_callback, metrics_callback],
-        progress_bar=True
+    eval_vec = attach_eval_env(
+        vec,
+        gamma=args.gamma,
+        use_train_options=args.eval_use_train_options,
+        leader_speed_scale=args.leader_speed_scale,
+        spawn_in_formation=args.spawn_in_formation,
+        disable_dynamic=args.disable_dynamic,
+        env_overrides=args.passthrough,
     )
 
+    eval_cb = EvalCallback(
+        eval_env=eval_vec,
+        best_model_save_path=ckpt_dir,
+        log_path=args.log_dir,
+        eval_freq=args.eval_every_steps,
+        n_eval_episodes=args.eval_episodes,
+        deterministic=True,
+        render=False,
+    )
+    progress_cb = ProgressLoggerCallback(
+        total_timesteps=args.total_timesteps,
+        log_every=args.progress_log_every,
+        window=max(2000, args.n_steps)
+    )
 
-    # -------------------------------------------------------------------------
-    # Save final model + normalization stats
-    # -------------------------------------------------------------------------
-    model_path = os.path.join(models_dir, "ppo_final_model")
-    model.save(model_path)
+    periodic_cb = PeriodicSaveCallback(
+    freq=args.save_every_steps,
+    save_dir=ckpt_dir,
+    vecnorm=vec,
+    prefix="ppo_multi",
+)
 
-    if args.normalize:
-        vec_env.save(os.path.join(models_dir, "vec_normalize.pkl"))
+    model.learn(
+        total_timesteps=args.total_timesteps,
+        callback=[checkpoint_cb, eval_cb, progress_cb, periodic_cb],
+    )
+    run_cfg = vars(args).copy()
+    run_cfg.update(dict(computed_total_rollout=total_rollout, computed_batch_size=batch_size, device=device, policy_net_arch=[256, 256]))
+    save_config(os.path.join(args.log_dir, "config.yaml"), run_cfg)
+    print(f"[INFO] n_envs={args.n_envs}  n_steps(per-env)={n_steps_per_env}  rollout={total_rollout}  batch={batch_size}  lr={args.learning_rate}  target_kl={args.target_kl}  ent_coef={args.ent_coef}", flush=True)
 
-    print("\nTraining complete!")
-    print(f"Final model saved to: {model_path}")
+    def _signal_handler(signum, frame):
+        print(f"\n[WARN] Caught signal {signum}. Saving and exiting...", flush=True)
+        graceful_save(model, vec, args.log_dir, name="interrupt")
+        sys.exit(0)
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+    try:
+        model.learn(total_timesteps=args.total_timesteps,
+            callback=[checkpoint_cb, eval_cb, progress_cb])
+    finally:
+        graceful_save(model, vec, args.log_dir, name="final")
+        vec.close()
+        eval_vec.close()
 
 
-# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     main()

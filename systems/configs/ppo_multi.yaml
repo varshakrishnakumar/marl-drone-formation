@@ -1,0 +1,125 @@
+common:
+  log_dir: runs/ppo_multi
+  auto_timestamp: true
+  resume_from_prev: true
+
+  # PPO base (stages can override any of these)
+  n_envs: 12                # if CPU allows; otherwise keep 8
+  n_steps: 3072             # longer rollouts tend to stabilize PPO here
+  n_epochs: 10
+  learning_rate: 0.0003
+  ent_coef: 0.001
+  vf_coef: 1.0
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.2
+  target_kl: 0.03
+  max_grad_norm: 0.5
+
+  # More frequent checkpoints/evals → better model selection
+  save_every_steps: 250000
+  eval_every_steps: 125000
+  eval_episodes: 10
+
+stages:
+  # ──────────────────────────────────────────────────────────────────────────
+  - name: stage0_warm          # small “settle” stage (short but useful)
+    total_timesteps: 1200000
+    # env
+    leader_speed_scale: 0.2
+    spawn_in_formation: true
+    disable_dynamic: true
+    eval_use_train_options: true
+    # PPO mild
+    learning_rate: 0.0003
+    clip_range: 0.2
+    target_kl: 0.03
+    ent_coef: 0.001
+    max_grad_norm: 0.5
+  # ──────────────────────────────────────────────────────────────────────────
+  - name: stage1_easy          # formation tracking stable
+    total_timesteps: 3000000
+    # env
+    leader_speed_scale: 0.3
+    spawn_in_formation: true
+    disable_dynamic: true
+    eval_use_train_options: true
+    # PPO (slightly stricter)
+    learning_rate: 0.00025
+    clip_range: 0.18
+    target_kl: 0.025
+    ent_coef: 0.0007
+    max_grad_norm: 0.45
+
+  # ──────────────────────────────────────────────────────────────────────────
+  - name: stage2_threat_slow   # introduce pursuer gently
+    total_timesteps: 2500000
+    # env
+    leader_speed_scale: 0.5
+    spawn_in_formation: true
+    disable_dynamic: false
+    eval_use_train_options: true
+    # pursuer / shaping
+    dynamic_aggression: 0.45          # slower chase
+    chase_mode: "nearest"
+    retarget_interval: 1.6
+    retarget_on_close: true
+    retarget_close_dist: 0.6
+    danger_radius: 1.0
+    safe_radius: 1.8
+    avoid_scale: 4.0
+    safe_bonus: 1.5
+    # PPO tighter
+    learning_rate: 0.0002
+    clip_range: 0.15
+    target_kl: 0.02
+    ent_coef: 0.0005
+    max_grad_norm: 0.4
+
+  # ──────────────────────────────────────────────────────────────────────────
+  - name: stage2_threat        # full speed pursuer + more retargets
+    total_timesteps: 4550000
+    # env
+    leader_speed_scale: 0.8
+    spawn_in_formation: true
+    disable_dynamic: false
+    eval_use_train_options: true
+    dynamic_aggression: 0.70
+    chase_mode: "nearest"
+    retarget_interval: 1.4
+    retarget_on_close: true
+    retarget_close_dist: 0.5
+    danger_radius: 1.0
+    safe_radius: 1.8
+    avoid_scale: 4.5           # slightly harsher near-danger
+    safe_bonus: 1.5
+    # PPO stricter yet
+    learning_rate: 0.00015
+    clip_range: 0.12
+    target_kl: 0.018
+    ent_coef: 0.0003
+    max_grad_norm: 0.35
+
+  # ──────────────────────────────────────────────────────────────────────────
+  - name: stage3_full          # final polish; tight policy with low exploration
+    total_timesteps: 3500000
+    # env
+    leader_speed_scale: 1.0
+    spawn_in_formation: true
+    disable_dynamic: false
+    eval_use_train_options: true
+    dynamic_aggression: 0.80
+    chase_mode: "random"       # broader exposure
+    retarget_interval: 1.2
+    retarget_on_close: true
+    retarget_close_dist: 0.5
+    danger_radius: 1.0
+    safe_radius: 1.9           # slightly stricter “safe”
+    avoid_scale: 5.0           # harsher near-danger
+    safe_bonus: 1.6
+    # PPO: low-entropy, tight clips, lower LR
+    learning_rate: 0.0001
+    clip_range: 0.1
+    target_kl: 0.015
+    ent_coef: 0.0001
+    max_grad_norm: 0.3
