@@ -1,0 +1,7 @@
+checkpoint,mfe_mean_avg,mdd_min_avg,collisions_any_total
+ppo_multi_1114112_steps.zip,8.741617202758789,inf,0
+ppo_multi_1310720_steps.zip,5.9704670906066895,inf,0
+ppo_multi_327680_steps.zip,8.646492958068848,inf,0
+ppo_multi_655360_steps.zip,5.422943592071533,inf,0
+ppo_multi_983040_steps.zip,5.642578125,inf,0
+best_model.zip,8.741617202758789,inf,0

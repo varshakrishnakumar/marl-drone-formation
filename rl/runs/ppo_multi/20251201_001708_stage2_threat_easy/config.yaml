@@ -1,0 +1,38 @@
+clip_range: 0.2
+computed_batch_size: 4096
+computed_total_rollout: 16384
+device: cpu
+disable_dynamic: false
+ent_coef: 0.0007
+eval_episodes: 5
+eval_every_steps: 163840
+eval_use_train_options: true
+gae_lambda: 0.95
+gamma: 0.995
+gui: false
+leader_speed_scale: 0.6
+learning_rate: 0.0001
+load: ''
+load_latest: false
+load_vecnorm: ''
+log_dir: /Users/varshakrishnakumar/Desktop/marl-drone-formation/rl/runs/ppo_multi/20251201_001708_stage2_threat_easy
+max_grad_norm: 0.5
+n_envs: 8
+n_epochs: 6
+n_steps: 2048
+passthrough:
+  chase_mode: nearest
+  dynamic_aggression: 0.4
+  retarget_interval: 2.5
+  retarget_on_close: true
+policy_net_arch:
+- 256
+- 256
+progress_log_every: 10000
+save_every_steps: 163840
+seed: 0
+spawn_in_formation: true
+start_method: forkserver
+target_kl: 0.02
+total_timesteps: 4800000
+vf_coef: 1.0
