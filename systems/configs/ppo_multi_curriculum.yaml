@@ -13,7 +13,7 @@ common:
   clip_range: 0.2
   target_kl: 0.03
   max_grad_norm: 0.5
-  save_every_steps: 327680      # 20 rollouts (20 * 16384)
+  save_every_steps: 163840      # 20 rollouts (20 * 16384)
   eval_every_steps: 163840 
   eval_episodes: 5
 
@@ -33,10 +33,10 @@ stages:
     eval_use_train_options: true
 
     # tighter slot-hold shaping
-    form_w_mean: 3.0             # ↑ from 1.8
-    form_w_max: 0.6              # ↑ from 0.3
+    form_w_mean: 1.8             # ↑ from 1.8
+    form_w_max: 0.3             # ↑ from 0.3
     form_var_gain: 0.35          # ↑ from 0.25
-    alt_w: 0.6                   # ↑ from 0.3
+    alt_w: 0.8                 # ↑ from 0.3
     huber_delta: 0.3             # ↓ from 0.5 (more sensitive to error)
 
     # same safety/comfort; keep simple
@@ -46,12 +46,38 @@ stages:
     sep_hysteresis: 0.06
 
     # flight smoothing
-    thrust_delta_scale: 0.15     # ↓ from 0.25 (less throttle inertia)
-    speed_smooth_gain: 0.05      # ↑ from 0.02 (less jitter)
+    thrust_delta_scale: 0.18     # ↓ from 0.25 (less throttle inertia)
+    speed_smooth_gain: 0.058      # ↑ from 0.02 (less jitter)
 
     # stage-local PPO nudges
     ent_coef: 0.0003             # ↓ from 0.001 for sharper policy
     target_kl: 0.02              # ↓ from 0.03 to avoid big jumps
+    max_roll_deg: 6
+    max_pitch_deg: 6
+    max_yaw_rate_deg: 60
+
+
+  
+  - name: stage0_polish
+    total_timesteps: 600000
+    spawn_in_formation: true
+    leader_speed_scale: 0.0
+    disable_dynamic: true
+    eval_use_train_options: true
+    formation_spacing: 0.9
+    min_sep: 0.55
+    # slightly stronger shaping, smoother motors
+    form_w_mean: 2.2
+    form_w_max: 0.35
+    huber_delta: 0.4
+    alt_w: 0.4
+    thrust_delta_scale: 0.15
+    speed_smooth_gain: 0.08
+    # PPO nits for stability
+    target_kl: 0.02
+    ent_coef: 0.0005
+    load: runs/ppo_multi/20251130_160343_stage0_warm/checkpoints/stage0_best.zip
+    load_vecnorm: runs/ppo_multi/20251130_160343_stage0_warm/vecnormalize_final.pkl
 
 
   - name: stage1_easy
@@ -68,6 +94,8 @@ stages:
     form_var_gain: 0.3
     huber_delta: 0.4
     alt_w: 0.4
+    load: runs/ppo_multi/20251130_160343_stage0_warm/checkpoints/stage0_best.zip
+    load_vecnorm: runs/ppo_multi/20251130_160343_stage0_warm/vecnormalize_final.pkl
 
   - name: stage2_threat_easy
     total_timesteps: 3500000

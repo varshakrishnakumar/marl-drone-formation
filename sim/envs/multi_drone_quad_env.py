@@ -20,13 +20,26 @@ class MultiDroneQuadEnv(gym.Env):
       - debug_diamond:      bool (render desired slots as green stems in GUI)
     """
 
-    metadata = {"render_modes": ["human"], "render_fps": 60}
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
     
-    def __init__(self, num_drones: int = 5, gui: bool = False, max_steps: int = 2000):
+    def __init__(
+        self,
+        num_drones: int = 5,
+        gui: bool = False,
+        max_steps: int = 2000,
+        render_mode: str | None = None,):
         super().__init__()
+        
         if num_drones < 1:
             raise ValueError("MultiDroneQuadEnv requires at least 1 drone.")
         self.num_drones = num_drones
+        self.gui = gui
+        
+        self.render_mode = render_mode
+        if render_mode == "human":
+            gui = True
+        if render_mode == "rgb_array":
+            gui = False
         self.gui = gui
 
         if p.isConnected():
@@ -127,9 +140,12 @@ class MultiDroneQuadEnv(gym.Env):
             dynamic_aggression = 0.7,
             debug_target = False,
             thrust_delta_scale = 0.4,
-            max_roll_de = 10.0,
+            max_roll_deg = 10.0,
             max_pitch_deg = 10.0,
             max_yaw_rate_deg = 60.0,
+            
+            workspace_radius = 2.0,
+            workspace_gain   = 0.4,
         )
 
         self._apply_cfg()
@@ -443,6 +459,13 @@ class MultiDroneQuadEnv(gym.Env):
                         return True
                     if prox_margin > 0.0 and p.getClosestPoints(bodyA, bodyB, prox_margin):
                         return True
+        # treat "fell below z_min" as a collision
+        z_min = 0.05
+        for i in range(self.num_drones):
+            pos, _ = p.getBasePositionAndOrientation(self.drone_ids[i])
+            if pos[2] < z_min:
+                return True
+
 
         for i in range(self.num_drones):
             for j in range(i + 1, self.num_drones):
@@ -478,9 +501,21 @@ class MultiDroneQuadEnv(gym.Env):
         rewards_all = self._compute_rewards(obs_all)
         team_reward = float(np.mean(rewards_all))
 
+        # --- formation-break termination using metrics from _compute_rewards ---
+        metrics = self.last_metrics or {}
+        mean_form_err = float(metrics.get("mean_form_error", 0.0))
+        max_form_err  = float(metrics.get("max_form_error", 0.0))
+
+        formation_break_mean = 5.0   # mean error threshold
+        formation_break_max  = 8.0   # worst drone threshold
+
         self.step_count += 1
         terminated = bool(self.collision_happened)
         truncated = bool(self.step_count >= self.max_steps)
+
+        if (mean_form_err > formation_break_mean) or (max_form_err > formation_break_max):
+            terminated = True
+        # ---------------------------------------------------------------
 
         info = {
             "per_drone_rewards": rewards_all,
@@ -934,26 +969,51 @@ class MultiDroneQuadEnv(gym.Env):
         r_form_var = -float(self.form_var_gain) * form_var
         r_height   = -float(self.alt_w)             * float(np.mean(z_errs))
         r_smooth   = -float(self.speed_smooth_gain) * float(np.mean(speeds))
+        
+        eulers = np.array(
+            [self._get_state(i)[2] for i in range(self.num_drones)],
+            dtype=np.float32
+        )
+        roll_pitch = np.abs(eulers[:, :2])  # |roll|, |pitch|
+        att_err = float(np.mean(roll_pitch))
+        att_w = getattr(self, "att_w", 0.5)  # add to cfg if you like
+        r_att = -att_w * att_err
 
         if threat:
             g = float(self.form_under_threat_gain)
             r_form     *= g
             r_form_var *= g
-        workspace_pen = 0.0
+        
+        wr = float(getattr(self, "workspace_radius", 2.0))
+        wg = float(getattr(self, "workspace_gain", 0.4))
+
         d_xy = np.linalg.norm(positions[:, :2] - leader_target[None, :2], axis=1)
-        excess = np.clip(d_xy - 2.5, 0.0, None)
-        workspace_pen = -0.2 * float(np.mean(excess))
+        excess = np.clip(d_xy - wr, 0.0, None)
+        workspace_pen = -wg * float(np.mean(excess))
+
 
 
         collision_penalty = -float(getattr(self, "collision_penalty", getattr(self, "collision_penalty_val", 8.0))) \
                             if self.collision_happened else 0.0
 
-        team_reward = (
-            r_form + r_form_var + r_height + r_smooth +
+        # team_reward = (
+        #     r_form + r_form_var + r_height + r_smooth +
+        #     r_evade + r_safe + sep_pen + static_pen + workspace_pen +
+        #     collision_penalty
+        # )
+        
+        raw_team_reward = (
+            r_form + r_form_var + r_height + r_smooth + r_att +
             r_evade + r_safe + sep_pen + static_pen + workspace_pen +
             collision_penalty
         )
+
+        # global reward scale to keep magnitudes moderate
+        reward_scale = 0.01
+        team_reward = reward_scale * raw_team_reward
+
         rewards = [float(team_reward)] * self.num_drones
+
 
         self.last_metrics = {
             "mean_form_error":  mean_form_err,
@@ -994,6 +1054,95 @@ class MultiDroneQuadEnv(gym.Env):
                 for j in range(i + 1, self.num_drones):
                     if np.linalg.norm(pos[i] - pos[j]) < self.min_sep:
                         p.addUserDebugLine(pos[i].tolist(), pos[j].tolist(), [1, 0, 0], lifeTime=0.1)
+    def _render_frame(self) -> np.ndarray:
+        """Return an RGB frame (H, W, 3) from a chase camera."""
+        if not self.drone_ids:
+            # nothing spawned yet
+            return np.zeros((360, 640, 3), dtype=np.uint8)
+
+        leader_pos, _ = p.getBasePositionAndOrientation(self.drone_ids[0])
+
+        view_matrix = p.computeViewMatrixFromYawPitchRoll(
+            cameraTargetPosition=leader_pos,
+            distance=3.0,
+            yaw=35.0,
+            pitch=-30.0,
+            roll=0.0,
+            upAxisIndex=2,
+        )
+        proj_matrix = p.computeProjectionMatrixFOV(
+            fov=60.0,
+            aspect=16.0 / 9.0,
+            nearVal=0.1,
+            farVal=10.0,
+        )
+        width, height, rgb, _, _ = p.getCameraImage(
+            width=640,
+            height=360,
+            viewMatrix=view_matrix,
+            projectionMatrix=proj_matrix,
+        )
+        frame = np.reshape(rgb, (height, width, 4))[:, :, :3]
+        return frame
+
+    def render(self, mode: str | None = None):
+        """
+        Gym/Gymnasium-style render.
+
+        - "human": rely on the PyBullet GUI (already handled by `gui=True`).
+        - "rgb_array": return a camera image as (H, W, 3) uint8 for video recording.
+        """
+        if mode is None:
+            mode = self.render_mode
+
+        if mode == "human":
+            # Nothing special to do; PyBullet GUI is already showing the scene.
+            return None
+
+        if mode != "rgb_array":
+            raise NotImplementedError(f"Unsupported render mode: {mode}")
+
+        # --- camera parameters (you can tweak these) ---
+        width, height = 640, 480
+
+        # Look at the leader drone if it exists; otherwise the origin
+        if self.drone_ids:
+            leader_pos, _ = p.getBasePositionAndOrientation(self.drone_ids[0])
+        else:
+            leader_pos = [0.0, 0.0, self.target_z]
+
+        cam_target = leader_pos
+        cam_distance = 3.0
+        cam_yaw = 35.0
+        cam_pitch = -30.0
+
+        view_matrix = p.computeViewMatrixFromYawPitchRoll(
+            cameraTargetPosition=cam_target,
+            distance=cam_distance,
+            yaw=cam_yaw,
+            pitch=cam_pitch,
+            roll=0.0,
+            upAxisIndex=2,
+        )
+        proj_matrix = p.computeProjectionMatrixFOV(
+            fov=60.0,
+            aspect=width / float(height),
+            nearVal=0.1,
+            farVal=10.0,
+        )
+
+        # pybullet returns (w, h, rgba, depth, seg)
+        _, _, rgba, _, _ = p.getCameraImage(
+            width=width,
+            height=height,
+            viewMatrix=view_matrix,
+            projectionMatrix=proj_matrix,
+        )
+
+        # Convert to (H, W, 3) uint8
+        frame = np.reshape(rgba, (height, width, 4))[:, :, :3]
+        return frame.astype(np.uint8)
+
 
     def get_desired_positions(self):
         leader_des = self.leader_trajectory(self.leader_traj_t)

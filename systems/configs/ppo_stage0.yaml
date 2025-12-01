@@ -1,0 +1,53 @@
+common:
+  log_dir: runs/ppo_multi
+  auto_timestamp: true
+  resume_from_prev: true
+  n_envs: 8
+  n_steps: 2048
+  n_epochs: 6          # was 10 – fewer epochs per batch
+  learning_rate: 0.0001  # was 0.0003 – smaller step size
+  ent_coef: 0.001
+  vf_coef: 1.0
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.2
+  target_kl: 0.03
+  max_grad_norm: 0.5
+  save_every_steps: 163840              # save model every 20 rollouts or so
+  eval_every_steps: 163840 
+  eval_episodes: 5
+
+stages:
+  - name: stage0_warm                   # Warm-up stage for formation hovering
+    total_timesteps: 1800000            # ~1.8 million steps of training
+    leader_speed_scale: 0.0             # Leader drone is stationary (no trajectory)
+    spawn_in_formation: true           # Drones start in diamond formation positions
+    disable_dynamic: true              # No dynamic sphere adversary present
+    eval_use_train_options: true       # Evaluate under same conditions as training
+
+    # Formation holding reward shaping
+    form_w_mean: 1.8                   # weight for mean formation error (↑ encourages tight formation)
+    form_w_max: 0.9                    # weight for max (worst) formation error
+    form_var_gain: 0.35                # weight on formation error variance (penalize uneven errors)
+    alt_w: 0.9                         # weight on altitude error (↑ to hold altitude steady)
+    huber_delta: 0.3                   # Huber loss threshold for slot error (more sensitive to deviations >0.3)
+
+    # Safety & comfort parameters
+    formation_spacing: 0.9             # relative spacing for diamond formation (larger = more spread out)
+    min_sep: 0.55                      # minimum allowed separation between drones (meters)
+    sep_gain: 1.2                      # penalty gain for violating separation
+    sep_hysteresis: 0.06               # hysteresis for separation enforcement (to avoid oscillation)
+
+    # Flight smoothing to reduce jitter
+    thrust_delta_scale: 0.03           # scale for throttle changes (low = very gradual throttle adjustments)
+    speed_smooth_gain: 0.1            # penalty gain for drone speed (higher = strong damping of motion)
+
+    # Stage-specific PPO tweaks for stability
+    ent_coef: 0.0005     # small entropy for stability
+    target_kl: 0.02
+    max_roll_deg: 3
+    max_pitch_deg: 3
+    max_yaw_rate_deg: 25
+    sep_radius: 0.38
+    workspace_radius: 2.0      # how far they’re allowed to wander from leader
+    workspace_gain: 0.4        # penalty strength for wandering
