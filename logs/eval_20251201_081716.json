@@ -1,0 +1,80 @@
+{
+  "episodes": 8,
+  "mfe_mean_avg": 0.2985362149775028,
+  "mdd_min_avg": 0.15397486463189125,
+  "collisions_any_total": 8,
+  "per_episode": [
+    {
+      "steps": 519,
+      "mfe_mean": 0.5596950650215149,
+      "mfe_p90": 1.3433022499084473,
+      "mdd_min": 0.14140741527080536,
+      "collision_any": 1,
+      "collision_rate": 0.0019267822736030828
+    },
+    {
+      "steps": 375,
+      "mfe_mean": 0.3071136176586151,
+      "mfe_p90": 0.7035872936248779,
+      "mdd_min": 0.31439629197120667,
+      "collision_any": 1,
+      "collision_rate": 0.0026666666666666666
+    },
+    {
+      "steps": 467,
+      "mfe_mean": 0.4511248469352722,
+      "mfe_p90": 1.0721163749694824,
+      "mdd_min": 0.11110926419496536,
+      "collision_any": 1,
+      "collision_rate": 0.0021413276231263384
+    },
+    {
+      "steps": 288,
+      "mfe_mean": 0.1856471300125122,
+      "mfe_p90": 0.3959824740886688,
+      "mdd_min": 0.0854644924402237,
+      "collision_any": 1,
+      "collision_rate": 0.003472222222222222
+    },
+    {
+      "steps": 307,
+      "mfe_mean": 0.20698362588882446,
+      "mfe_p90": 0.45237189531326294,
+      "mdd_min": 0.08966951817274094,
+      "collision_any": 1,
+      "collision_rate": 0.003257328990228013
+    },
+    {
+      "steps": 280,
+      "mfe_mean": 0.17721596360206604,
+      "mfe_p90": 0.37369054555892944,
+      "mdd_min": 0.08485262840986252,
+      "collision_any": 1,
+      "collision_rate": 0.0035714285714285713
+    },
+    {
+      "steps": 298,
+      "mfe_mean": 0.19664698839187622,
+      "mfe_p90": 0.4250675141811371,
+      "mdd_min": 0.09338516741991043,
+      "collision_any": 1,
+      "collision_rate": 0.003355704697986577
+    },
+    {
+      "steps": 373,
+      "mfe_mean": 0.30386248230934143,
+      "mfe_p90": 0.6946847438812256,
+      "mdd_min": 0.31151413917541504,
+      "collision_any": 1,
+      "collision_rate": 0.002680965147453083
+    }
+  ],
+  "thresholds": {
+    "max_mfe": 2.0,
+    "forbid_collision": true
+  },
+  "outputs": {
+    "csv": "logs/eval_20251201_081716.csv",
+    "json": "logs/eval_20251201_081716.json"
+  }
+}

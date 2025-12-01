@@ -1,0 +1,40 @@
+{
+  "episodes": 3,
+  "mfe_mean_avg": 0.1858735829591751,
+  "mdd_min_avg": Infinity,
+  "collisions_any_total": 3,
+  "per_episode": [
+    {
+      "steps": 752,
+      "mfe_mean": 0.1858735829591751,
+      "mfe_p90": 0.40942662954330444,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0013297872340425532
+    },
+    {
+      "steps": 752,
+      "mfe_mean": 0.1858735829591751,
+      "mfe_p90": 0.40942662954330444,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0013297872340425532
+    },
+    {
+      "steps": 752,
+      "mfe_mean": 0.1858735829591751,
+      "mfe_p90": 0.40942662954330444,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0013297872340425532
+    }
+  ],
+  "thresholds": {
+    "max_mfe": 2.0,
+    "forbid_collision": true
+  },
+  "outputs": {
+    "csv": "logs/eval_20251130_224341.csv",
+    "json": "logs/eval_20251130_224341.json"
+  }
+}

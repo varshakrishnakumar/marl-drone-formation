@@ -1,0 +1,80 @@
+{
+  "episodes": 8,
+  "mfe_mean_avg": 0.27247482538223267,
+  "mdd_min_avg": Infinity,
+  "collisions_any_total": 8,
+  "per_episode": [
+    {
+      "steps": 356,
+      "mfe_mean": 0.27247482538223267,
+      "mfe_p90": 0.5773433446884155,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028089887640449437
+    },
+    {
+      "steps": 356,
+      "mfe_mean": 0.27247482538223267,
+      "mfe_p90": 0.5773433446884155,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028089887640449437
+    },
+    {
+      "steps": 356,
+      "mfe_mean": 0.27247482538223267,
+      "mfe_p90": 0.5773433446884155,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028089887640449437
+    },
+    {
+      "steps": 356,
+      "mfe_mean": 0.27247482538223267,
+      "mfe_p90": 0.5773433446884155,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028089887640449437
+    },
+    {
+      "steps": 356,
+      "mfe_mean": 0.27247482538223267,
+      "mfe_p90": 0.5773433446884155,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028089887640449437
+    },
+    {
+      "steps": 356,
+      "mfe_mean": 0.27247482538223267,
+      "mfe_p90": 0.5773433446884155,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028089887640449437
+    },
+    {
+      "steps": 356,
+      "mfe_mean": 0.27247482538223267,
+      "mfe_p90": 0.5773433446884155,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028089887640449437
+    },
+    {
+      "steps": 356,
+      "mfe_mean": 0.27247482538223267,
+      "mfe_p90": 0.5773433446884155,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028089887640449437
+    }
+  ],
+  "thresholds": {
+    "max_mfe": 2.0,
+    "forbid_collision": true
+  },
+  "outputs": {
+    "csv": "logs/eval_20251201_044002.csv",
+    "json": "logs/eval_20251201_044002.json"
+  }
+}

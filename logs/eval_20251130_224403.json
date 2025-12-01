@@ -1,0 +1,96 @@
+{
+  "episodes": 10,
+  "mfe_mean_avg": 0.09149685502052307,
+  "mdd_min_avg": Infinity,
+  "collisions_any_total": 10,
+  "per_episode": [
+    {
+      "steps": 288,
+      "mfe_mean": 0.09149685502052307,
+      "mfe_p90": 0.2339494675397873,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.003472222222222222
+    },
+    {
+      "steps": 288,
+      "mfe_mean": 0.09149685502052307,
+      "mfe_p90": 0.2339494675397873,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.003472222222222222
+    },
+    {
+      "steps": 288,
+      "mfe_mean": 0.09149685502052307,
+      "mfe_p90": 0.2339494675397873,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.003472222222222222
+    },
+    {
+      "steps": 288,
+      "mfe_mean": 0.09149685502052307,
+      "mfe_p90": 0.2339494675397873,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.003472222222222222
+    },
+    {
+      "steps": 288,
+      "mfe_mean": 0.09149685502052307,
+      "mfe_p90": 0.2339494675397873,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.003472222222222222
+    },
+    {
+      "steps": 288,
+      "mfe_mean": 0.09149685502052307,
+      "mfe_p90": 0.2339494675397873,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.003472222222222222
+    },
+    {
+      "steps": 288,
+      "mfe_mean": 0.09149685502052307,
+      "mfe_p90": 0.2339494675397873,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.003472222222222222
+    },
+    {
+      "steps": 288,
+      "mfe_mean": 0.09149685502052307,
+      "mfe_p90": 0.2339494675397873,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.003472222222222222
+    },
+    {
+      "steps": 288,
+      "mfe_mean": 0.09149685502052307,
+      "mfe_p90": 0.2339494675397873,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.003472222222222222
+    },
+    {
+      "steps": 288,
+      "mfe_mean": 0.09149685502052307,
+      "mfe_p90": 0.2339494675397873,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.003472222222222222
+    }
+  ],
+  "thresholds": {
+    "max_mfe": 2.0,
+    "forbid_collision": true
+  },
+  "outputs": {
+    "csv": "logs/eval_20251130_224403.csv",
+    "json": "logs/eval_20251130_224403.json"
+  }
+}

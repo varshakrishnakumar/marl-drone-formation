@@ -1,0 +1,80 @@
+{
+  "episodes": 8,
+  "mfe_mean_avg": 0.16319160163402557,
+  "mdd_min_avg": Infinity,
+  "collisions_any_total": 8,
+  "per_episode": [
+    {
+      "steps": 355,
+      "mfe_mean": 0.16319160163402557,
+      "mfe_p90": 0.4133090376853943,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028169014084507044
+    },
+    {
+      "steps": 355,
+      "mfe_mean": 0.16319160163402557,
+      "mfe_p90": 0.4133090376853943,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028169014084507044
+    },
+    {
+      "steps": 355,
+      "mfe_mean": 0.16319160163402557,
+      "mfe_p90": 0.4133090376853943,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028169014084507044
+    },
+    {
+      "steps": 355,
+      "mfe_mean": 0.16319160163402557,
+      "mfe_p90": 0.4133090376853943,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028169014084507044
+    },
+    {
+      "steps": 355,
+      "mfe_mean": 0.16319160163402557,
+      "mfe_p90": 0.4133090376853943,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028169014084507044
+    },
+    {
+      "steps": 355,
+      "mfe_mean": 0.16319160163402557,
+      "mfe_p90": 0.4133090376853943,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028169014084507044
+    },
+    {
+      "steps": 355,
+      "mfe_mean": 0.16319160163402557,
+      "mfe_p90": 0.4133090376853943,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028169014084507044
+    },
+    {
+      "steps": 355,
+      "mfe_mean": 0.16319160163402557,
+      "mfe_p90": 0.4133090376853943,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0028169014084507044
+    }
+  ],
+  "thresholds": {
+    "max_mfe": 2.0,
+    "forbid_collision": true
+  },
+  "outputs": {
+    "csv": "logs/eval_20251130_225708.csv",
+    "json": "logs/eval_20251130_225708.json"
+  }
+}
