@@ -38,7 +38,7 @@ def make_env(
     gui: bool = False,
     *,
     num_drones: int = 5,
-    max_steps: int = 3000,
+    max_steps: int = 2000,
     leader_speed_scale: float = 0.8,
     spawn_in_formation: bool = True,
     disable_dynamic: bool = False,
