@@ -25,7 +25,7 @@ def random_initial_conditions(num_drones=5):
         "obstacle_jitter": np.random.uniform(-0.4, 0.4, size=3),
         "dynamic_jitter": np.random.uniform(-0.4, 0.4, size=3),
 
-        # **Make sphere active & randomize chase behavior per episode**
+        # **Make sphere active & randomize chase behavior per ep**
         "disable_dynamic": False,                      # ensure the chaser is ON
         "chase_mode": np.random.choice(chase_modes),   # random mode each episode
     }
