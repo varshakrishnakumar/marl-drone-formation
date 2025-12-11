@@ -1,27 +1,60 @@
 common:
-  log_dir: runs/ppo_multi
-  auto_timestamp: true
-  resume_from_prev: false
+  algo: ppo_multi
   n_envs: 8
   n_steps: 2048
-  n_epochs: 10
-  learning_rate: 0.0003
-  ent_coef: 0.001
+  n_epochs: 6
+  learning_rate: 1e-4
+  ent_coef: 5e-4
   vf_coef: 1.0
   gamma: 0.995
   gae_lambda: 0.95
   clip_range: 0.2
-  target_kl: 0.03
+  target_kl: 0.02
   max_grad_norm: 0.5
-  save_every_steps: 62500     # ~=500k transitions @ n_envs=8
-  eval_every_steps: 31250      # ~=250k transitions
+  total_timesteps: 1_800_000
+  save_every_steps: 163_840
+  eval_every_steps: 163_840
+  eval_episodes: 5
+  # only one stage here; we’ll set load manually
+  resume_from_prev: false
 
 stages:
-  - name: stage2_threat
-    total_timesteps: 3000000
-    leader_speed_scale: 0.8
+  - name: stage2_threat_easy_tuned
+    # start from your *Stage 1* best model
+    load: runs/ppo_multi/20251202_134844_stage1_easy/checkpoints/best_model.zip
+    load_vecnorm: runs/ppo_multi/20251202_134844_stage1_easy/vecnormalize_final.pkl
+
+    # env / threat settings (same as stage2, tweak as you like)
+    leader_speed_scale: 0.3
     spawn_in_formation: true
-    disable_dynamic: false      # SPHERE ON
-    eval_use_train_options: true
-    load: runs/ppo_multi/20251129_212108_stage1_easy/checkpoints/best_model.zip
-    load_vecnorm: runs/ppo_multi/20251129_212108_stage1_easy/vecnormalize_final.pkl
+    disable_dynamic: false
+
+    dynamic_aggression: 0.3
+    chase_mode: nearest
+
+    # formation / altitude weights (example tuned version)
+    form_w_mean: 2.2
+    form_w_max: 1.2
+    form_var_gain: 0.35
+    alt_w: 1.2
+    huber_delta: 0.3
+
+    formation_spacing: 0.9
+    min_sep: 0.55
+    sep_radius: 0.38
+    sep_gain: 1.2
+    sep_hysteresis: 0.06
+
+    # control limits
+    thrust_delta_scale: 0.05
+    speed_smooth_gain: 0.06
+    max_roll_deg: 5
+    max_pitch_deg: 5
+    max_yaw_rate_deg: 45
+
+    # extra safety shaping
+    att_w: 0.7
+    collision_penalty: 20.0
+
+    workspace_radius: 2.0
+    workspace_gain: 0.4

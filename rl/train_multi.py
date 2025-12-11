@@ -22,7 +22,6 @@ from collections import deque
 from stable_baselines3.common.callbacks import BaseCallback
 
 
-
 class ResetOptionsWrapper(gym.Wrapper):
     """Injects reset(options=...) on every env.reset(). Why: enforce stage options reliably across resets."""
     def __init__(self, env: gym.Env, options: dict):
@@ -127,24 +126,30 @@ class ProgressLoggerCallback(BaseCallback):
     Prints a simple progress bar and rolling metrics pulled from env `infos`.
     Also logs scalars to TensorBoard under `train/*`.
     """
-    def __init__(self, total_timesteps: int, log_every: int = 10000, window: int = 5000, verbose: int = 1):
+    def __init__(self, total_timesteps: int, log_every: int = 10000,
+                 window: int = 5000, verbose: int = 1):
         super().__init__(verbose)
         self.total_timesteps = int(total_timesteps)
         self.log_every = int(log_every)
         self.window = int(window)
         self._last_log = 0
         self._t0 = time.time()
-        self._mfe = deque(maxlen=window)
-        self._mdd = deque(maxlen=window)
-        self._col = deque(maxlen=window)
-        self._rew = deque(maxlen=window)
+
+        # rolling windows
+        self._mfe = deque(maxlen=window)   # mean formation error
+        self._mdd = deque(maxlen=window)   # min dyn distance
+        self._col = deque(maxlen=window)   # collision indicator
+        self._rew = deque(maxlen=window)   # reward
+        self._stl = deque(maxlen=window)   # STL robustness margin (optional)
 
     def _on_step(self) -> bool:
+        # rolling reward
         rewards = self.locals.get("rewards", None)
         if rewards is not None:
             for r in np.atleast_1d(rewards):
                 self._rew.append(float(r))
 
+        # metrics from env.info
         infos = self.locals.get("infos", [])
         for info in infos or []:
             m = info.get("metrics", {})
@@ -154,6 +159,9 @@ class ProgressLoggerCallback(BaseCallback):
                 self._mdd.append(float(m["min_dyn_distance"]))
             if "collision" in m:
                 self._col.append(float(m["collision"]))
+            # this is safe even if env doesn't provide stl_margin
+            if "stl_margin" in m:
+                self._stl.append(float(m["stl_margin"]))
 
         steps = int(self.model.num_timesteps)
         if steps - self._last_log >= self.log_every:
@@ -167,6 +175,7 @@ class ProgressLoggerCallback(BaseCallback):
             mean_mfe = np.mean(self._mfe) if len(self._mfe) else float("nan")
             mean_mdd = np.mean(self._mdd) if len(self._mdd) else float("nan")
             col_rate = np.mean(self._col) if len(self._col) else float("nan")
+            mean_stl = np.mean(self._stl) if len(self._stl) else float("nan")
 
             elapsed = time.time() - self._t0
             msg = (
@@ -176,16 +185,26 @@ class ProgressLoggerCallback(BaseCallback):
                 f"mfe≈{mean_mfe: .3f}  "
                 f"mdd≈{mean_mdd: .3f}  "
                 f"coll_rate≈{col_rate: .3f}  "
+                f"stl≈{mean_stl: .3f}  "
                 f"t={elapsed:,.0f}s"
             )
             print(msg, flush=True)
 
+            # log to TensorBoard
             self.logger.record("train/progress_percent", pct)
-            if len(self._rew): self.logger.record("train/roll_reward_mean", float(mean_rew))
-            if len(self._mfe): self.logger.record("train/mfe_mean_roll", float(mean_mfe))
-            if len(self._mdd): self.logger.record("train/min_dyn_dist_roll", float(mean_mdd))
-            if len(self._col): self.logger.record("train/collision_rate_roll", float(col_rate))
+            if len(self._rew):
+                self.logger.record("train/roll_reward_mean", float(mean_rew))
+            if len(self._mfe):
+                self.logger.record("train/mfe_mean_roll", float(mean_mfe))
+            if len(self._mdd):
+                self.logger.record("train/min_dyn_dist_roll", float(mean_mdd))
+            if len(self._col):
+                self.logger.record("train/collision_rate_roll", float(col_rate))
+            if len(self._stl):
+                self.logger.record("train/stl_margin_roll", float(mean_stl))
+
         return True
+
     
 class PeriodicSaveCallback(BaseCallback):
     """Hard-save model + vecnorm every `freq` timesteps, independent of EvalCallback."""
@@ -224,6 +243,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gui", action="store_true")
     p.add_argument("--start_method", type=str, default="forkserver",
                    choices=["fork", "forkserver", "spawn"])
+    p.add_argument("--num_drones", type=int, default=5)
+    p.add_argument("--max_steps", type=int, default=2000)
+
 
     p.add_argument("--n_steps", type=int, default=2048)
     p.add_argument("--n_epochs", type=int, default=10)
@@ -259,26 +281,33 @@ def parse_args() -> argparse.Namespace:
     args, unknown = p.parse_known_args()
 
     passthrough = {}
-    it = iter(unknown)
-    for tok in it:
+    i = 0
+    while i < len(unknown):
+        tok = unknown[i]
         if not tok.startswith("--"):
+            i += 1
             continue
         key = tok[2:]
-        peek = next(it, None)
-        if peek is None or peek.startswith("--"):
+
+        # flag-only
+        if i + 1 >= len(unknown) or unknown[i + 1].startswith("--"):
             passthrough[key] = True
-            if peek is not None:
-                it = (v for v in ([peek] + list(it)))
+            i += 1
+            continue
+
+        raw = unknown[i + 1]
+        i += 2
+
+        if isinstance(raw, str) and raw.lower() in ("true", "false"):
+            passthrough[key] = (raw.lower() == "true")
         else:
             try:
-                passthrough[key] = float(peek)
+                passthrough[key] = float(raw)
             except ValueError:
-                if isinstance(peek, str) and peek.lower() in ("true", "false"):
-                    passthrough[key] = (peek.lower() == "true")
-                else:
-                    passthrough[key] = peek
+                passthrough[key] = raw
 
     args.passthrough = passthrough
+
     return args
 
 
@@ -292,11 +321,15 @@ def main():
     ckpt_dir = os.path.join(args.log_dir, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
     env_kwargs = dict(
+        num_drones=args.num_drones,
+        max_steps=args.max_steps,
         leader_speed_scale=args.leader_speed_scale,
         spawn_in_formation=args.spawn_in_formation,
         disable_dynamic=args.disable_dynamic,
         **args.passthrough,
     )
+
+
 
     env_kwargs.update(getattr(args, "passthrough", {}))
 
@@ -327,11 +360,13 @@ def main():
     total_rollout = n_steps_per_env * args.n_envs
     batch_size = max(1024, total_rollout // 4)
 
-    policy_kwargs: Dict[str, Any] = dict(
-        net_arch=[256, 256],
-        activation_fn=torch.nn.Tanh,
-        ortho_init=True,
+    policy_kwargs = dict(
+    net_arch=[256, 256],
+    activation_fn=torch.nn.Tanh,
+    ortho_init=True,
+    log_std_init=-2.0,
     )
+
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -404,35 +439,49 @@ def main():
     )
 
     periodic_cb = PeriodicSaveCallback(
-    freq=args.save_every_steps,
-    save_dir=ckpt_dir,
-    vecnorm=vec,
-    prefix="ppo_multi",
-)
-
-    model.learn(
-        total_timesteps=args.total_timesteps,
-        callback=[checkpoint_cb, eval_cb, progress_cb, periodic_cb],
+        freq=args.save_every_steps,
+        save_dir=ckpt_dir,
+        vecnorm=vec,
+        prefix="ppo_multi",
     )
+
+    # Snapshot config for reproducibility
     run_cfg = vars(args).copy()
-    run_cfg.update(dict(computed_total_rollout=total_rollout, computed_batch_size=batch_size, device=device, policy_net_arch=[256, 256]))
+    run_cfg.update(
+        dict(
+            computed_total_rollout=total_rollout,
+            batch_size=batch_size,
+            device=device,
+            policy_net_arch=[256, 256],
+        )
+    )
     save_config(os.path.join(args.log_dir, "config.yaml"), run_cfg)
-    print(f"[INFO] n_envs={args.n_envs}  n_steps(per-env)={n_steps_per_env}  rollout={total_rollout}  batch={batch_size}  lr={args.learning_rate}  target_kl={args.target_kl}  ent_coef={args.ent_coef}", flush=True)
+    print(
+        f"[INFO] n_envs={args.n_envs}  n_steps(per-env)={n_steps_per_env}  "
+        f"rollout={total_rollout}  batch_size={batch_size}  device={device}  "
+        f"target_kl={args.target_kl}  ent_coef={args.ent_coef}",
+        flush=True,
+    )
+
+    callbacks = [checkpoint_cb, eval_cb, progress_cb, periodic_cb]
 
     def _signal_handler(signum, frame):
         print(f"\n[WARN] Caught signal {signum}. Saving and exiting...", flush=True)
         graceful_save(model, vec, args.log_dir, name="interrupt")
+        vec.close()
+        eval_vec.close()
         sys.exit(0)
+
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
     try:
-        model.learn(total_timesteps=args.total_timesteps,
-            callback=[checkpoint_cb, eval_cb, progress_cb])
+        model.learn(total_timesteps=args.total_timesteps, callback=callbacks)
     finally:
         graceful_save(model, vec, args.log_dir, name="final")
         vec.close()
         eval_vec.close()
+
 
 
 if __name__ == "__main__":

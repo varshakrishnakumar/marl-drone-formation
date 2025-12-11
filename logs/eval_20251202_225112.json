@@ -1,0 +1,24 @@
+{
+  "episodes": 1,
+  "mfe_mean_avg": 0.6056446433067322,
+  "mdd_min_avg": Infinity,
+  "collisions_any_total": 1,
+  "per_episode": [
+    {
+      "steps": 701,
+      "mfe_mean": 0.6056446433067322,
+      "mfe_p90": 1.3732644319534302,
+      "mdd_min": Infinity,
+      "collision_any": 1,
+      "collision_rate": 0.0014265335235378032
+    }
+  ],
+  "thresholds": {
+    "max_mfe": 2.0,
+    "forbid_collision": true
+  },
+  "outputs": {
+    "csv": "logs/eval_20251202_225112.csv",
+    "json": "logs/eval_20251202_225112.json"
+  }
+}

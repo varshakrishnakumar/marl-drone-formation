@@ -1,0 +1,72 @@
+batch_size: 4096
+clip_range: 0.15
+computed_total_rollout: 16384
+device: cpu
+disable_dynamic: true
+ent_coef: 0.0
+eval_episodes: 5
+eval_every_steps: 163840
+eval_use_train_options: true
+gae_lambda: 0.95
+gamma: 0.995
+gui: false
+leader_speed_scale: 0.0
+learning_rate: 0.00015
+load: ''
+load_latest: false
+load_vecnorm: ''
+log_dir: runs/ppo_multi/20251211_081210_stage0_hover_stabilize
+max_grad_norm: 0.5
+max_steps: 2000
+n_envs: 8
+n_epochs: 5
+n_steps: 2048
+num_drones: 5
+passthrough:
+  action_rate_w: 2.0
+  action_smooth_alpha: 0.85
+  alive_bonus: 2.0
+  alt_w: 1.0
+  ang_vel_w: 0.02
+  att_w: 0.9
+  collision_penalty: 2000.0
+  dynamic_repulse_gain: 0.8
+  dynamic_repulse_radius: 1.0
+  form_var_gain: 0.25
+  form_w_max: 0.25
+  form_w_mean: 1.6
+  formation_break_max: 9999.0
+  formation_break_mean: 9999.0
+  formation_break_penalty: 2000.0
+  formation_spacing: 1.0
+  huber_delta: 0.35
+  max_pitch_deg: 4.0
+  max_roll_deg: 4.0
+  max_yaw_rate_deg: 20.0
+  min_sep: 0.55
+  obstacle_repulse_gain: 0.0
+  obstacle_repulse_radius: 0.7
+  sep_force: 0.6
+  sep_gain: 1.2
+  sep_hysteresis: 0.08
+  sep_radius: 0.6
+  speed_smooth_gain: 0.05
+  static_clear_gain: 0.0
+  stl_margin_weight: 0.0
+  terminate_on_drone_collision: true
+  thrust_delta_scale: 0.12
+  tilt_terminate_deg: 30.0
+  use_stl_reward: true
+  workspace_gain: 0.4
+  workspace_radius: 2.2
+policy_net_arch:
+- 256
+- 256
+progress_log_every: 20000
+save_every_steps: 163840
+seed: 0
+spawn_in_formation: true
+start_method: forkserver
+target_kl: 0.015
+total_timesteps: 2000000
+vf_coef: 1.0

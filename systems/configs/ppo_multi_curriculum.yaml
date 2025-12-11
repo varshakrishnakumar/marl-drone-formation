@@ -1,177 +1,347 @@
 common:
-  log_dir: runs/ppo_multi
+  log_dir: runs/ppo_multi          # Logging directory
   auto_timestamp: true
-  resume_from_prev: true         # stage N resumes from stage N-1
+  resume_from_prev: true
+
+  # PPO hyperparameters
   n_envs: 8
   n_steps: 2048
   n_epochs: 10
-  learning_rate: 0.0003
-  ent_coef: 0.001
+  learning_rate: 0.00025
+  ent_coef: 0.0005
   vf_coef: 1.0
   gamma: 0.995
   gae_lambda: 0.95
   clip_range: 0.2
-  target_kl: 0.03
+  target_kl: 0.02
   max_grad_norm: 0.5
-  save_every_steps: 163840      # 20 rollouts (20 * 16384)
-  eval_every_steps: 163840 
-  eval_episodes: 5
+  progress_log_every: 20000
+  use_stl_reward: true
 
-# STAGE NOTES:
-# - stage0: stationary leader, big spacing, no sphere → learn hover + slot hold safely
-# - stage1: slow leader, static obstacles → track formation w/ mild motion
-# - stage2: enable sphere, low aggression, nearest chase → keep shape + gentle avoid
-# - stage3: faster leader + mixed chase modes → robustness
-# - stage4: hard sphere + tighter spacing, stricter separation → final performance
+  save_every_steps: 163840
+  eval_every_steps: 163840
+  eval_episodes: 5
+  eval_use_train_options: true
+
+  # Environment global settings
+  max_steps: 2000                  # Max steps per episode (unchanged)
+  num_drones: 5
+  spawn_in_formation: true
+  tilt_terminate_deg: 30
+  terminate_on_drone_collision: true
+  formation_break_mean: 2.0        # Loose formation-break thresholds (will tighten per stage if needed)
+  formation_break_max: 3.0
+
+  collision_penalty: 2000
+
+  # Default reward shaping weights (overridden per stage where needed)
+  att_w: 0.9
+  speed_smooth_gain: 0.05
+  workspace_radius: 2.2
+  workspace_gain: 0.4
+
+  obstacle_repulse_radius: 0.7
+  obstacle_repulse_gain: 0.6
+  dynamic_repulse_radius: 1.0
+  dynamic_repulse_gain: 0.8
+
+  # **STL reward shaping (global defaults)**
+  stl_margin_weight: 0.0           # Default weight (per-stage overrides below)
 
 stages:
-  - name: stage0_warm
-    total_timesteps: 1800000     # +300k to let it settle
+  - name: stage0_hover_stabilize
+    # Easier initial stage: focus on basic hover stability.
+    learning_rate: 0.00015
+    n_epochs: 5
+    clip_range: 0.15
+    target_kl: 0.015
+    ent_coef: 0.0
+
+    alive_bonus: 2.0
+    formation_break_penalty: 2000
+    collision_penalty: 2000
+
+    action_rate_w: 1.0
+    ang_vel_w: 0.02
+    action_smooth_alpha: 0.85   # stronger smoothing
+    action_rate_w: 2.0          # penalize action jumps more
+
+    formation_break_mean: 9999.0   # Disable formation-break termination in Stage 0:contentReference[oaicite:0]{index=0}
+    formation_break_max: 9999.0
+
+    total_timesteps: 2000000
     leader_speed_scale: 0.0
-    spawn_in_formation: true
-    disable_dynamic: true
-    eval_use_train_options: true
+    disable_dynamic: true         # No dynamic threat
+    obstacle_repulse_gain: 0.0
+    static_clear_gain: 0.0
 
-    # tighter slot-hold shaping
-    form_w_mean: 1.8             # ↑ from 1.8
-    form_w_max: 0.3             # ↑ from 0.3
-    form_var_gain: 0.35          # ↑ from 0.25
-    alt_w: 0.8                 # ↑ from 0.3
-    huber_delta: 0.3             # ↓ from 0.5 (more sensitive to error)
+    form_w_mean: 1.6
+    form_w_max: 0.25
+    form_var_gain: 0.25
+    huber_delta: 0.35
+    alt_w: 1.0
 
-    # same safety/comfort; keep simple
-    formation_spacing: 0.9
+    formation_spacing: 1.0
     min_sep: 0.55
+    sep_radius: 0.60
     sep_gain: 1.2
-    sep_hysteresis: 0.06
+    sep_hysteresis: 0.08
+    sep_force: 0.60
 
-    # flight smoothing
-    thrust_delta_scale: 0.18     # ↓ from 0.25 (less throttle inertia)
-    speed_smooth_gain: 0.058      # ↑ from 0.02 (less jitter)
+    max_roll_deg: 4
+    max_pitch_deg: 4
+    max_yaw_rate_deg: 20
+    thrust_delta_scale: 0.12
 
-    # stage-local PPO nudges
-    ent_coef: 0.0003             # ↓ from 0.001 for sharper policy
-    target_kl: 0.02              # ↓ from 0.03 to avoid big jumps
+    stl_margin_weight: 0.0         # No STL shaping in Stage 0 (focus on basic stability)
+
+  - name: stage0b_hover_with_repulsion
+    # Introduce static obstacle repulsion and slight formation shaping.
+    total_timesteps: 1000000
+    leader_speed_scale: 0.0
+    disable_dynamic: true         # Still no dynamic threat
+
+    obstacle_repulse_gain: 0.4
+    static_clear_gain: 0.05
+    alive_bonus: 1.5
+
+    form_w_mean: 1.7
+    form_w_max: 0.30
+    form_var_gain: 0.25
+    alt_w: 0.9
+    huber_delta: 0.35
+    ang_vel_w: 0.02
+    action_smooth_alpha: 0.85   # stronger smoothing
+    action_rate_w: 2.0          # penalize action jumps more
+    stl_margin_weight: 5.0
+
+    formation_spacing: 0.95
+    min_sep: 0.55
+    sep_radius: 0.60
+    sep_gain: 1.3
+    sep_hysteresis: 0.08
+    sep_force: 0.65
+
+    max_roll_deg: 5
+    max_pitch_deg: 5
+    max_yaw_rate_deg: 25
+    thrust_delta_scale: 0.14
+
+    ent_coef: 0.0003
+    target_kl: 0.015
+
+    stl_margin_weight: 5.0         # Begin gentle STL shaping (small weight)
+
+  - name: stage1_track_slow
+    # Slow leader movement; emphasize maintaining formation and obstacle clearance.
+    total_timesteps: 2000000
+    leader_speed_scale: 0.20
+    disable_dynamic: true
+
+    obstacle_repulse_gain: 0.6
+    stl_margin_weight: 10.0
+    static_clear_gain: 0.20
+    alive_bonus: 2.0
+
+    form_w_mean: 1.9
+    form_w_max: 0.35
+    form_var_gain: 0.28
+    huber_delta: 0.38
+    alt_w: 0.8
+
+    formation_spacing: 0.90
+    min_sep: 0.55
+    sep_radius: 0.60
+    sep_gain: 1.4
+    sep_hysteresis: 0.07
+    sep_force: 0.75
+
     max_roll_deg: 6
     max_pitch_deg: 6
-    max_yaw_rate_deg: 60
+    max_yaw_rate_deg: 30
+    thrust_delta_scale: 0.16
 
+    stl_margin_weight: 10.0        # Increase STL reward weight (enforce specs mildly)
 
-  
-  - name: stage0_polish
-    total_timesteps: 600000
-    spawn_in_formation: true
-    leader_speed_scale: 0.0
+  - name: stage1b_track_medium
+    # Moderate leader speed; tighter formation and clearance.
+    total_timesteps: 2500000
+    leader_speed_scale: 0.35
     disable_dynamic: true
-    eval_use_train_options: true
-    formation_spacing: 0.9
-    min_sep: 0.55
-    # slightly stronger shaping, smoother motors
-    form_w_mean: 2.2
-    form_w_max: 0.35
-    huber_delta: 0.4
-    alt_w: 0.4
-    thrust_delta_scale: 0.15
-    speed_smooth_gain: 0.08
-    # PPO nits for stability
-    target_kl: 0.02
-    ent_coef: 0.0005
-    load: runs/ppo_multi/20251130_160343_stage0_warm/checkpoints/stage0_best.zip
-    load_vecnorm: runs/ppo_multi/20251130_160343_stage0_warm/vecnormalize_final.pkl
 
+    obstacle_repulse_gain: 0.7
+    static_clear_gain: 0.30
 
-  - name: stage1_easy
-    total_timesteps: 3000000
-    spawn_in_formation: true
-    leader_speed_scale: 0.3
-    disable_dynamic: true
-    eval_use_train_options: true
+    form_w_mean: 2.1
+    form_w_max: 0.40
+    form_var_gain: 0.30
+    alive_bonus: 2.0
+    huber_delta: 0.40
+    alt_w: 0.7
+
     formation_spacing: 0.85
-    min_sep: 0.55
-    sep_gain: 1.5
-    form_w_mean: 2.0
-    form_w_max: 0.4
-    form_var_gain: 0.3
-    huber_delta: 0.4
-    alt_w: 0.4
-    load: runs/ppo_multi/20251130_160343_stage0_warm/checkpoints/stage0_best.zip
-    load_vecnorm: runs/ppo_multi/20251130_160343_stage0_warm/vecnormalize_final.pkl
+    min_sep: 0.56
+    sep_radius: 0.62
+    sep_gain: 1.6
+    sep_hysteresis: 0.07
+    stl_margin_weight: 25.0
+    sep_force: 0.85
 
-  - name: stage2_threat_easy
-    total_timesteps: 3500000
-    spawn_in_formation: true
-    leader_speed_scale: 0.6
-    disable_dynamic: false
-    eval_use_train_options: true
-    # Sphere behavior
+    max_roll_deg: 7
+    max_pitch_deg: 7
+    max_yaw_rate_deg: 40
+    thrust_delta_scale: 0.18
+
+    stl_margin_weight: 20.0        # Stronger STL shaping as tasks get harder
+
+  - name: stage2_threat_intro
+    # Introduce a mild dynamic threat (moving sphere) with low aggression.
+    total_timesteps: 3000000
+    leader_speed_scale: 0.55
+    disable_dynamic: false        # Enable dynamic threat
+
     chase_mode: "nearest"
-    dynamic_aggression: 0.4
-    retarget_interval: 2.5
+    dynamic_aggression: 0.25
+    alive_bonus: 2.0
+    retarget_interval: 3.0
     retarget_on_close: true
-    retarget_close_dist: 0.6
-    # Avoidance shaping
-    threat_radius: 1.3
-    danger_radius: 0.8
-    safe_radius: 1.7
-    evade_gain: 0.6
-    avoid_scale: 3.0
-    safe_bonus: 1.0
-    form_under_threat_gain: 1.4
-    # Separation
-    min_sep: 0.55
-    sep_radius: 0.38
-    sep_gain: 1.7
+    retarget_close_dist: 0.70
+
+    dynamic_repulse_radius: 1.05
+    dynamic_repulse_gain: 0.70
+
+    threat_radius: 1.6
+    danger_radius: 0.95
+    safe_radius: 2.0
+    evade_gain: 0.4
+    avoid_scale: 2.5
+    safe_bonus: 2.0
+    form_under_threat_gain: 1.20
+
+    obstacle_repulse_gain: 0.7
+    static_clear_gain: 0.35
+
+    form_w_mean: 2.2
+    form_w_max: 0.45
+    form_var_gain: 0.30
+    huber_delta: 0.40
+    alt_w: 0.7
+
+    formation_spacing: 0.84
+    min_sep: 0.58
+    sep_radius: 0.64
+    sep_gain: 1.8
+    sep_hysteresis: 0.06
+    stl_margin_weight: 50.0
+    sep_force: 0.95
+
+    max_roll_deg: 8
+    max_pitch_deg: 8
+    max_yaw_rate_deg: 45
+    thrust_delta_scale: 0.22
+
+    stl_margin_weight: 50.0        # Emphasize spec satisfaction (formation, separation, clearance, threat)
 
   - name: stage3_threat_mixed
-    total_timesteps: 4000000
-    spawn_in_formation: true
-    leader_speed_scale: 0.8
+    # Mixed behavior threat (more aggressive/random). Formation thresholds tightened.
+    total_timesteps: 3500000
+    leader_speed_scale: 0.80
     disable_dynamic: false
-    eval_use_train_options: true
-    # Sphere: more assertive + varied targets
+
     chase_mode: "random"
-    dynamic_aggression: 0.65
-    retarget_interval: 1.8
+    dynamic_aggression: 0.55
+    retarget_interval: 2.2
     retarget_on_close: true
-    retarget_close_dist: 0.5
-    # Shaping a bit harsher
-    form_w_mean: 2.2
-    form_w_max: 0.5
-    form_var_gain: 0.35
-    threat_radius: 1.2
-    danger_radius: 0.9
-    safe_radius: 1.8
-    evade_gain: 0.7
-    avoid_scale: 3.2
-    # Separation stricter
-    min_sep: 0.58
-    sep_radius: 0.40
+    alive_bonus: 2.0
+    retarget_close_dist: 0.60
+
+    dynamic_repulse_radius: 1.05
+    dynamic_repulse_gain: 0.85
+
+    threat_radius: 1.5
+    danger_radius: 1.0
+    safe_radius: 2.1
+    evade_gain: 0.6
+    avoid_scale: 3.0
+    safe_bonus: 2.5
+    form_under_threat_gain: 1.30
+
+    obstacle_repulse_gain: 0.8
+    static_clear_gain: 0.45
+
+    form_w_mean: 2.4
+    form_w_max: 0.50
+    form_var_gain: 0.32
+    huber_delta: 0.42
+    alt_w: 0.65
+
+    formation_spacing: 0.80
+    min_sep: 0.60
+    sep_radius: 0.66
     sep_gain: 2.0
+    sep_hysteresis: 0.06
+    sep_force: 1.05
+
+    max_roll_deg: 10
+    max_pitch_deg: 10
+    max_yaw_rate_deg: 60
+    thrust_delta_scale: 0.25
+
+    # Slightly relax formation-break termination to encourage threat avoidance
+    formation_break_mean: 2.5       # Allow a bit more deviation before terminating
+    formation_break_max: 3.5
+    stl_margin_weight: 65.0
+
+    stl_margin_weight: 75.0        # High STL weight – specs are critical in this stage
 
   - name: stage4_threat_hard
-    total_timesteps: 4500000
-    spawn_in_formation: true
-    leader_speed_scale: 1.0
+    # Hard mode threat: highest aggression. Priority is survival while maintaining performance.
+    total_timesteps: 4000000
+    leader_speed_scale: 1.00
     disable_dynamic: false
-    eval_use_train_options: true
-    # Sphere: aggressive + “most_error” to stress the formation
+
     chase_mode: "most_error"
-    dynamic_aggression: 0.85
-    retarget_interval: 1.5
+    dynamic_aggression: 0.80
+    retarget_interval: 1.6
     retarget_on_close: true
-    retarget_close_dist: 0.45
-    # Strongest shaping
-    form_w_mean: 2.4
-    form_w_max: 0.6
-    form_var_gain: 0.4
-    threat_radius: 1.1
+    retarget_close_dist: 0.50
+
+    dynamic_repulse_radius: 1.10
+    dynamic_repulse_gain: 1.00
+
+    threat_radius: 1.4
     danger_radius: 1.0
-    safe_radius: 2.0
-    evade_gain: 0.8
+    safe_radius: 2.2
+    evade_gain: 0.7
     avoid_scale: 3.5
-    # Tight spacing & strict separation
-    formation_spacing: 0.8
-    min_sep: 0.6
-    sep_radius: 0.42
-    sep_gain: 2.3
-    collision_penalty: 10.0
+    safe_bonus: 3.0
+    form_under_threat_gain: 1.0   
+
+    obstacle_repulse_gain: 0.9
+    static_clear_gain: 0.55
+
+    form_w_mean: 2.8
+    form_w_max: 0.60
+    form_var_gain: 0.35
+    huber_delta: 0.45
+    alt_w: 0.6
+
+    formation_spacing: 0.78
+    min_sep: 0.62
+    sep_radius: 0.68
+    sep_gain: 2.2
+    sep_hysteresis: 0.05
+    sep_force: 1.15
+
+    max_roll_deg: 10
+    max_pitch_deg: 10
+    max_yaw_rate_deg: 60
+    thrust_delta_scale: 0.28
+
+    # **Prioritize survival:** disable formation-break terminations in final stage
+    formation_break_mean: 9999.0   # No episode termination for formation 
+    formation_break_max: 9999.0
+    stl_margin_weight: 100.0
+
+    alive_bonus: 0.2               # Small reward each step for staying alive (encourages longer episodes)
+    stl_margin_weight: 100.0       # **Maximum STL weight:** heavily enforce spec satisfaction in Stage 4

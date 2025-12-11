@@ -1,0 +1,48 @@
+common:
+  algo: ppo_multi
+  n_envs: 8
+  n_steps: 2048
+  n_epochs: 6
+  learning_rate: 1e-4
+  ent_coef: 5e-4
+  vf_coef: 1.0
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.2
+  target_kl: 0.02
+  max_grad_norm: 0.5
+  total_timesteps: 1_800_000
+  save_every_steps: 163_840
+  eval_every_steps: 163_840
+  eval_episodes: 5
+  resume_from_prev: false
+
+stages:
+  - name: stage1_easy_tuned
+    # start from existing Stage‑0 best model:
+    load: runs/ppo_multi/20251202_131433_stage0_warm/checkpoints/best_model.zip
+    load_vecnorm: runs/ppo_multi/20251202_131433_stage0_warm/vecnormalize_final.pkl
+
+    # and then paste the tuned Stage‑1 params from above here
+    leader_speed_scale: 0.3
+    spawn_in_formation: true
+    disable_dynamic: true
+    form_w_mean: 2.0
+    form_w_max: 1.0
+    form_var_gain: 0.35
+    alt_w: 1.2
+    huber_delta: 0.3
+    formation_spacing: 0.9
+    min_sep: 0.55
+    sep_radius: 0.38
+    sep_gain: 1.2
+    sep_hysteresis: 0.06
+    thrust_delta_scale: 0.04
+    speed_smooth_gain: 0.06
+    max_roll_deg: 4
+    max_pitch_deg: 4
+    max_yaw_rate_deg: 45
+    att_w: 1.5
+    collision_penalty: 40.0
+    workspace_radius: 2.0
+    workspace_gain: 0.4

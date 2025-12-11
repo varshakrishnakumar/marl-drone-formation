@@ -135,23 +135,38 @@ def run_eval(
                 obs, rewards, dones, infos = eval_env.step(action)
 
                 info = infos[0]
-                trace = info.get("trace_row", None)
+                trace = info.get("trace_row")
+
+                # --- always create a row so CSV is never empty ---
+                row = {k: np.nan for k in FIELDNAMES}
+                row["episode"] = ep
+                row["step_in_episode"] = step_in_ep
+                row["reward"] = float(rewards[0])
 
                 if trace is not None:
-                    row = {k: trace.get(k, np.nan) for k in FIELDNAMES}
-                    row["episode"] = ep
-                    row["step_in_episode"] = step_in_ep
-                    writer.writerow(row)
+                    # Fill in any fields that are present in trace_row
+                    for k, v in trace.items():
+                        if k in row:
+                            row[k] = v
 
-                    times.append(trace.get("time_s", np.nan))
+                    t = trace.get("time_s", float(step_in_ep))
+                    times.append(t)
                     mean_fe.append(trace.get("mean_form_error", np.nan))
                     max_fe.append(trace.get("max_form_error", np.nan))
                     z_err.append(trace.get("mean_z_error", np.nan))
                     collisions.append(trace.get("collisions", np.nan))
+                else:
+                    # Fallback: approximate time and collisions from what we have
+                    times.append(float(step_in_ep))
+                    mean_fe.append(np.nan)
+                    max_fe.append(np.nan)
+                    z_err.append(np.nan)
+                    collisions.append(float(info.get("collisions", 0.0)))
+
+                writer.writerow(row)
 
                 done = bool(dones[0])
                 step_in_ep += 1
-
             obs = eval_env.reset()
 
     eval_env.close()

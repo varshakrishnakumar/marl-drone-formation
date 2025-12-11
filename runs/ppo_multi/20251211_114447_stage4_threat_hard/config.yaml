@@ -1,0 +1,80 @@
+batch_size: 4096
+clip_range: 0.2
+computed_total_rollout: 16384
+device: cpu
+disable_dynamic: false
+ent_coef: 0.0005
+eval_episodes: 5
+eval_every_steps: 163840
+eval_use_train_options: true
+gae_lambda: 0.95
+gamma: 0.995
+gui: false
+leader_speed_scale: 1.0
+learning_rate: 0.00025
+load: /Users/varshakrishnakumar/Desktop/marl-drone-formation/runs/ppo_multi/20251211_103248_stage3_threat_mixed/checkpoints/best_model.zip
+load_latest: false
+load_vecnorm: /Users/varshakrishnakumar/Desktop/marl-drone-formation/runs/ppo_multi/20251211_103248_stage3_threat_mixed/vecnormalize_final.pkl
+log_dir: runs/ppo_multi/20251211_114447_stage4_threat_hard
+max_grad_norm: 0.5
+max_steps: 2000
+n_envs: 8
+n_epochs: 10
+n_steps: 2048
+num_drones: 5
+passthrough:
+  alive_bonus: 0.2
+  alt_w: 0.6
+  att_w: 0.9
+  avoid_scale: 3.5
+  chase_mode: most_error
+  collision_penalty: 2000.0
+  danger_radius: 1.0
+  dynamic_aggression: 0.8
+  dynamic_repulse_gain: 1.0
+  dynamic_repulse_radius: 1.1
+  evade_gain: 0.7
+  form_under_threat_gain: 1.0
+  form_var_gain: 0.35
+  form_w_max: 0.6
+  form_w_mean: 2.8
+  formation_break_max: 9999.0
+  formation_break_mean: 9999.0
+  formation_spacing: 0.78
+  huber_delta: 0.45
+  max_pitch_deg: 10.0
+  max_roll_deg: 10.0
+  max_yaw_rate_deg: 60.0
+  min_sep: 0.62
+  obstacle_repulse_gain: 0.9
+  obstacle_repulse_radius: 0.7
+  retarget_close_dist: 0.5
+  retarget_interval: 1.6
+  retarget_on_close: true
+  safe_bonus: 3.0
+  safe_radius: 2.2
+  sep_force: 1.15
+  sep_gain: 2.2
+  sep_hysteresis: 0.05
+  sep_radius: 0.68
+  speed_smooth_gain: 0.05
+  static_clear_gain: 0.55
+  stl_margin_weight: 100.0
+  terminate_on_drone_collision: true
+  threat_radius: 1.4
+  thrust_delta_scale: 0.28
+  tilt_terminate_deg: 30.0
+  use_stl_reward: true
+  workspace_gain: 0.4
+  workspace_radius: 2.2
+policy_net_arch:
+- 256
+- 256
+progress_log_every: 20000
+save_every_steps: 163840
+seed: 0
+spawn_in_formation: true
+start_method: forkserver
+target_kl: 0.02
+total_timesteps: 4000000
+vf_coef: 1.0

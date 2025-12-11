@@ -47,7 +47,6 @@ class MultiDroneQuadEnv(gym.Env):
         else:
             self.physics_client = p.connect(p.GUI if self.gui else p.DIRECT)
         p.setRealTimeSimulation(0)
-
         self.max_steps = int(max_steps)
         self.step_count = 0
         self.collision_happened = False
@@ -58,11 +57,14 @@ class MultiDroneQuadEnv(gym.Env):
         self.dynamic_obstacle_id: int | None = None
         self.dynamic_phase = 0.0
         self._last_retarget_time = 0.0
-
         self.act_per_drone = 4
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(self.num_drones * self.act_per_drone,), dtype=np.float32
         )
+        self._prev_action = np.zeros((self.num_drones, self.act_per_drone), dtype=np.float32)
+        self.last_action = np.zeros_like(self._prev_action)
+        self.last_action_delta = np.zeros_like(self._prev_action)
+
         self.self_dim = 12
         self.neighbor_dim = 6 * (self.num_drones - 1)
         self.num_static_obstacles = 4
@@ -91,7 +93,9 @@ class MultiDroneQuadEnv(gym.Env):
         self.kp_roll = 4.0;  self.kd_roll = 0.5
         self.kp_pitch = 4.0; self.kd_pitch = 0.5
         self.kp_yaw_rate = 0.3; self.kd_yaw = 0.05
-        self.kp_z = 20.0; self.kd_z = 8.0
+        self.kp_z = 25.0
+        self.kd_z = 10.0
+
 
         self.max_torque = np.array([1e-3, 1e-3, 5e-4], dtype=np.float32)
         self.thrust_delta_scale = 0.4
@@ -104,6 +108,17 @@ class MultiDroneQuadEnv(gym.Env):
             disable_dynamic    = True,
             debug_diamond      = False,
             debug_separation   = False,
+            # --- stability / anti-chatter shaping ---
+            alive_bonus = 0.0,                 # + per step (raw units, before reward_scale)
+            formation_break_penalty = 0.0,     # terminal penalty on formation-break (raw units)
+
+            att_w = 0.5,                       # attitude penalty weight (was hardcoded via getattr)
+            ang_vel_w = 0.0,                   # penalize |omega| (body/world ang vel magnitude)
+
+            action_mag_w = 0.0,                # penalize |action|^2
+            action_rate_w = 0.0,               # penalize |Δaction|^2
+
+            action_smooth_alpha = 0.0,         # 0..0.95 low-pass on commands (env-side)
 
             form_w_mean = 1.5,
             form_w_max  = 0.4,
@@ -118,7 +133,7 @@ class MultiDroneQuadEnv(gym.Env):
             sep_radius = 0.35,
             sep_gain = 1.5,
             sep_hysteresis = 0.05,
-            sep_force = 0.8, 
+            sep_force = 0.8,
 
             static_clear_gain = 0.4,
 
@@ -143,10 +158,31 @@ class MultiDroneQuadEnv(gym.Env):
             max_roll_deg = 10.0,
             max_pitch_deg = 10.0,
             max_yaw_rate_deg = 60.0,
-            
+
             workspace_radius = 2.0,
             workspace_gain   = 0.4,
+            tilt_terminate_deg = 30.0, # if |roll| or |pitch| > this, end the episode
+
+            # formation-break termination thresholds (meters)
+            formation_break_mean = 2.0,  # terminate if mean formation error exceeds this
+            formation_break_max  = 3.0,  # terminate if any drone exceeds this
+
+            # soft physical repulsion from obstacles / dynamic sphere
+            obstacle_repulse_radius = 0.7,
+            obstacle_repulse_gain   = 1.0,
+            dynamic_repulse_radius  = 0.9,
+            dynamic_repulse_gain    = 1.2,
+
+            # --- STL-style reward options ---
+            use_stl_reward  = False,   # when True, reward = STL-style robustness margin
+            stl_form_tol    = 0.5,     # desired upper bound on mean formation error (m)
+            stl_max_tol     = 1.0,     # desired upper bound on max formation error (m)
+            stl_reward_clip = 2.0,     # clamp STL robustness in [-clip, clip]
+
+            # scale for legacy shaped reward (kept for backward compatibility)
+            reward_scale    = 0.01,
         )
+
 
         self._apply_cfg()
         
@@ -182,8 +218,11 @@ class MultiDroneQuadEnv(gym.Env):
 
         min_pair = _min_pairwise_distance([self.formation_offsets[i] for i in range(self.num_drones)])
         if min_pair < self.cfg["min_sep"] + 0.05:
-            print(f"[WARN] formation spacing {min_pair:.2f} < min_sep+margin {self.cfg['min_sep']+0.05:.2f}. "
-                "Expect separation/collision chatter. Consider spacing↑ or min_sep↓.")
+            print(
+                f"[WARN] formation spacing {min_pair:.2f} < min_sep+margin {self.cfg['min_sep']+0.05:.2f}. "
+                "Expect separation/collision chatter. Consider spacing↑ or min_sep↓."
+            )
+
     def _apply_cfg(self):
         """Mirror cfg entries to attributes that other methods expect."""
         for k, v in self.cfg.items():
@@ -192,6 +231,7 @@ class MultiDroneQuadEnv(gym.Env):
         self.max_roll = np.deg2rad(float(self.cfg.get("max_roll_deg", 10.0)))
         self.max_pitch = np.deg2rad(float(self.cfg.get("max_pitch_deg", 10.0)))
         self.max_yaw_rate = np.deg2rad(float(self.cfg.get("max_yaw_rate_deg", 60.0)))
+
             
     @staticmethod
     def _huber(x: np.ndarray, delta: float) -> np.ndarray:
@@ -263,6 +303,11 @@ class MultiDroneQuadEnv(gym.Env):
         self.leader_traj_t = 0.0
         self.dynamic_phase = 0.0
         self._last_retarget_time = 0.0
+        self._prev_action.fill(0.0)
+        self.last_action.fill(0.0)
+        self.last_action_delta.fill(0.0)
+
+
 
         p.resetSimulation()
         p.setGravity(0, 0, -9.81)
@@ -358,7 +403,9 @@ class MultiDroneQuadEnv(gym.Env):
             "static_clear_gain","threat_radius","evade_gain",
             "danger_radius","safe_radius","avoid_scale","safe_bonus","collision_penalty",
             "thrust_delta_scale","max_roll_deg","max_pitch_deg","max_yaw_rate_deg",
+            "reward_scale","stl_form_tol","stl_max_tol","stl_reward_clip",
         )
+
         for k in fine_keys:
             if k in opts:
                 setattr(self, k, float(opts[k]))
@@ -426,20 +473,107 @@ class MultiDroneQuadEnv(gym.Env):
 
                 if getattr(self, "debug_separation", False) and self.gui:
                     p.addUserDebugLine(pos[i].tolist(), pos[j].tolist(), [1, 0, 0], lifeTime=0.05)
+    def _apply_obstacle_repulsion(self):
+        """
+        Apply soft radial repulsion forces away from static obstacles and the dynamic pursuer.
+
+        This mirrors the pairwise separation forces but against environment geometry, so that
+        drones get a gentle push away before hard collisions occur.
+        """
+        # nothing to do if there are no drones
+        if self.num_drones <= 0:
+            return
+
+        # --- static obstacle repulsion ---
+        if self.obstacle_ids:
+            r_obs = float(getattr(self, "obstacle_repulse_radius", 0.7))
+            k_obs = float(getattr(self, "obstacle_repulse_gain", 1.0))
+            c_obs = 0.3 * k_obs
+            f_obs_max = 3.0 * k_obs
+
+            for did in self.drone_ids:
+                pos_i, _ = p.getBasePositionAndOrientation(did)
+                vel_i, _ = p.getBaseVelocity(did)
+                pos_i = np.asarray(pos_i, dtype=np.float32)
+                vel_i = np.asarray(vel_i, dtype=np.float32)
+
+                net_force = np.zeros(3, dtype=np.float32)
+                for oid in self.obstacle_ids:
+                    if oid is None:
+                        continue
+                    opos, _ = p.getBasePositionAndOrientation(oid)
+                    opos = np.asarray(opos, dtype=np.float32)
+
+                    dvec = pos_i - opos
+                    d = float(np.linalg.norm(dvec))
+                    if d < 1e-6 or d > r_obs:
+                        continue
+
+                    n_hat = dvec / d
+                    # distance-based scaling in [0,1]
+                    s = (r_obs - d) / max(r_obs, 1e-6)
+                    v_rel_n = float(np.dot(vel_i, n_hat))
+                    f_mag = k_obs * s - c_obs * v_rel_n
+                    f_mag = float(np.clip(f_mag, -f_obs_max, f_obs_max))
+                    net_force += n_hat * f_mag
+
+                if np.linalg.norm(net_force) > 0.0:
+                    p.applyExternalForce(
+                        did, -1, net_force.tolist(),
+                        [0.0, 0.0, 0.0], p.WORLD_FRAME
+                    )
+
+        # --- dynamic sphere repulsion ---
+        if self.dynamic_obstacle_id is not None:
+            dyn_pos, _ = p.getBasePositionAndOrientation(self.dynamic_obstacle_id)
+            dyn_pos = np.asarray(dyn_pos, dtype=np.float32)
+
+            # default to danger_radius if present
+            base_r = float(getattr(self, "dynamic_repulse_radius",
+                                   getattr(self, "danger_radius", 0.8)))
+            r_dyn = max(0.1, base_r)
+            k_dyn = float(getattr(self, "dynamic_repulse_gain", 1.2))
+            c_dyn = 0.3 * k_dyn
+            f_dyn_max = 3.0 * k_dyn
+
+            for did in self.drone_ids:
+                pos_i, _ = p.getBasePositionAndOrientation(did)
+                vel_i, _ = p.getBaseVelocity(did)
+                pos_i = np.asarray(pos_i, dtype=np.float32)
+                vel_i = np.asarray(vel_i, dtype=np.float32)
+
+                dvec = pos_i - dyn_pos
+                d = float(np.linalg.norm(dvec))
+                if d < 1e-6 or d > r_dyn:
+                    continue
+
+                n_hat = dvec / d
+                s = (r_dyn - d) / max(r_dyn, 1e-6)
+                v_rel_n = float(np.dot(vel_i, n_hat))
+                f_mag = k_dyn * s - c_dyn * v_rel_n
+                f_mag = float(np.clip(f_mag, -f_dyn_max, f_dyn_max))
+                p.applyExternalForce(
+                    did, -1, (n_hat * f_mag).tolist(),
+                    [0.0, 0.0, 0.0], p.WORLD_FRAME
+                )
+
 
     
     def _check_collisions(self) -> bool:
         """
         Return True if a terminating collision occurred.
+
         Extras:
-        - ignores contacts for a short cooldown right after reset (spawn settling)
+        - ignores contacts for a very short cooldown right after reset (spawn settling)
         - optional proximity early-out via getClosestPoints margin
         """
-        if self.step_count < 10:
+        # only skip collision checks on the very first step after reset
+        if self.step_count < 1:
             return False
 
-        prox_margin = 0.0
+        prox_margin = 0.0  # can be > 0.0 to turn on "near miss" termination
 
+        # Drone vs static obstacles
         if self.obstacle_ids:
             for i in range(self.num_drones):
                 bodyA = self.drone_ids[i]
@@ -449,16 +583,19 @@ class MultiDroneQuadEnv(gym.Env):
                         continue
                     if p.getContactPoints(bodyA, obs):
                         return True
-                    if prox_margin > 0.0:
-                        if p.getClosestPoints(bodyA, obs, prox_margin):
-                            return True
+                    if prox_margin > 0.0 and p.getClosestPoints(bodyA, obs, prox_margin):
+                        return True
 
-                if self.dynamic_obstacle_id is not None:
-                    bodyB = self.dynamic_obstacle_id
-                    if p.getContactPoints(bodyA, bodyB):
-                        return True
-                    if prox_margin > 0.0 and p.getClosestPoints(bodyA, bodyB, prox_margin):
-                        return True
+        # Drone vs dynamic obstacle (pursuer)
+        if self.dynamic_obstacle_id is not None:
+            bodyB = self.dynamic_obstacle_id
+            for i in range(self.num_drones):
+                bodyA = self.drone_ids[i]
+                if p.getContactPoints(bodyA, bodyB):
+                    return True
+                if prox_margin > 0.0 and p.getClosestPoints(bodyA, bodyB, prox_margin):
+                    return True
+
         # treat "fell below z_min" as a collision
         z_min = 0.05
         for i in range(self.num_drones):
@@ -466,23 +603,45 @@ class MultiDroneQuadEnv(gym.Env):
             if pos[2] < z_min:
                 return True
 
+        # treat excessive tilt as a crash, too
+        tilt_deg = float(getattr(self, "tilt_terminate_deg", 30.0))
+        if tilt_deg > 0.0:
+            tilt_rad = np.deg2rad(tilt_deg)
+            for i in range(self.num_drones):
+                _, quat = p.getBasePositionAndOrientation(self.drone_ids[i])
+                roll, pitch, _ = p.getEulerFromQuaternion(quat)
+                if abs(roll) > tilt_rad or abs(pitch) > tilt_rad:
+                    return True
 
+        # Drone–drone physical contact
         for i in range(self.num_drones):
             for j in range(i + 1, self.num_drones):
                 if p.getContactPoints(self.drone_ids[i], self.drone_ids[j]):
                     return bool(self.terminate_on_drone_collision)
-                if prox_margin > 0.0 and p.getClosestPoints(self.drone_ids[i], self.drone_ids[j], prox_margin):
-                    return bool(self.terminate_on_drone_collision)
 
-        return False
+
 
     def step(self, action):
         action = np.asarray(action, dtype=np.float32).reshape(self.num_drones, self.act_per_drone)
 
+        # --- optional command smoothing (kills 240Hz chatter) ---
+        alpha = float(getattr(self, "action_smooth_alpha", 0.0))
+        if alpha > 0.0:
+            action = alpha * self._prev_action + (1.0 - alpha) * action
+
+        # --- cache action + delta-action for reward terms ---
+        self.last_action_delta = action - self._prev_action
+        self._prev_action = action.copy()
+        self.last_action = action.copy()
+
+        # high-level attitude + thrust control
         for i in range(self.num_drones):
             self._apply_action(i, action[i])
 
+        # pairwise drone separation forces
         self._apply_separation_forces()
+        # repulsive forces from static obstacles / dynamic pursuer
+        self._apply_obstacle_repulsion()
 
         if not self.disable_dynamic:
             self._update_dynamic_obstacle()
@@ -498,30 +657,23 @@ class MultiDroneQuadEnv(gym.Env):
         obs_all = self._get_all_obs()
         global_obs = obs_all.flatten().astype(np.float32)
 
-        rewards_all = self._compute_rewards(obs_all)
+        rewards_all = self._compute_rewards(obs_all)  # now includes formation-break penalty too
         team_reward = float(np.mean(rewards_all))
 
-        # --- formation-break termination using metrics from _compute_rewards ---
         metrics = self.last_metrics or {}
-        mean_form_err = float(metrics.get("mean_form_error", 0.0))
-        max_form_err  = float(metrics.get("max_form_error", 0.0))
-
-        formation_break_mean = 5.0   # mean error threshold
-        formation_break_max  = 8.0   # worst drone threshold
+        formation_break = bool(metrics.get("formation_break", 0.0))
 
         self.step_count += 1
-        terminated = bool(self.collision_happened)
+        terminated = bool(self.collision_happened or formation_break)
         truncated = bool(self.step_count >= self.max_steps)
-
-        if (mean_form_err > formation_break_mean) or (max_form_err > formation_break_max):
-            terminated = True
-        # ---------------------------------------------------------------
 
         info = {
             "per_drone_rewards": rewards_all,
             "metrics": self.last_metrics,
         }
         return global_obs, team_reward, terminated, truncated, info
+
+
 
     def _spawn_drones(self, num: int):
         """
@@ -852,49 +1004,64 @@ class MultiDroneQuadEnv(gym.Env):
         return pos, vel, euler, ang
 
 
-    def _apply_action(self, drone_idx: int, act_vec: np.ndarray):
+    def _apply_action(self, drone_idx: int, act_vec: np.ndarray) -> None:
+        # --- decode normalized actions ---
         roll_cmd, pitch_cmd, yawrate_cmd, thrust_cmd = np.asarray(act_vec, dtype=np.float32)
 
-        roll_des = float(np.clip(roll_cmd,  -1.0, 1.0)) * float(self.max_roll)
-        pitch_des = float(np.clip(pitch_cmd, -1.0, 1.0)) * float(self.max_pitch)
-        yaw_rate_des = float(np.clip(yawrate_cmd, -1.0, 1.0)) * float(self.max_yaw_rate)
+        roll_des = float(np.clip(roll_cmd, -1.0, 1.0)) * float(self.max_roll)         # rad
+        pitch_des = float(np.clip(pitch_cmd, -1.0, 1.0)) * float(self.max_pitch)      # rad
+        yaw_rate_des = float(np.clip(yawrate_cmd, -1.0, 1.0)) * float(self.max_yaw_rate)  # rad/s
 
-        pos, vel, euler, ang = self._get_state(drone_idx)
-        roll, pitch, yaw = float(euler[0]), float(euler[1]), float(euler[2])
-        wx, wy, wz = float(ang[0]), float(ang[1]), float(ang[2])
+        # --- state ---
+        pos, vel, euler, w_world = self._get_state(drone_idx)
+        roll, pitch = float(euler[0]), float(euler[1])
+        z, vz = float(pos[2]), float(vel[2])
 
-        tau_x = self.kp_roll  * (roll_des  - roll)  - self.kd_roll  * wx
-        tau_y = self.kp_pitch * (pitch_des - pitch) - self.kd_pitch * wy
-        tau_z = self.kp_yaw_rate * (yaw_rate_des - wz) - self.kd_yaw * wz
+        # --- WORLD -> BODY angular velocity ---
+        _, orn = p.getBasePositionAndOrientation(self.drone_ids[drone_idx])
+        R = np.array(p.getMatrixFromQuaternion(orn), dtype=np.float32).reshape(3, 3)  # body->world
+        w_body = R.T @ np.asarray(w_world, dtype=np.float32)  # world->body
+
+        # --- attitude / yaw-rate PD -> BODY torques ---
+        tau_x = self.kp_roll * (roll_des - roll) - self.kd_roll * float(w_body[0])
+        tau_y = self.kp_pitch * (pitch_des - pitch) - self.kd_pitch * float(w_body[1])
+        tau_z = self.kp_yaw_rate * (yaw_rate_des - float(w_body[2])) - self.kd_yaw * float(w_body[2])
 
         tau = np.array([tau_x, tau_y, tau_z], dtype=np.float32)
         tau = np.clip(tau, -self.max_torque, self.max_torque)
 
-        z = float(pos[2]); vz = float(vel[2])
+        # --- altitude PD in WORLD-Z -> desired WORLD vertical force ---
         err_z = float(self.target_z) - z
         Fz_pd = self.kp_z * err_z - self.kd_z * vz
+        thrust_bias = float(np.clip(thrust_cmd, -1.0, 1.0)) * float(self.thrust_delta_scale) * float(self.hover_thrust)
+        Fz_world_des = float(self.hover_thrust) + float(Fz_pd) + float(thrust_bias)
 
-        thrust_bias = float(np.clip(thrust_cmd, -1.0, 1.0)) * (float(self.thrust_delta_scale) * float(self.hover_thrust))
-        thrust = float(np.clip(float(self.hover_thrust) + Fz_pd + thrust_bias, 0.0, 3.0 * float(self.hover_thrust)))
+        # --- convert desired WORLD vertical force into BODY thrust (because we apply in LINK_FRAME) ---
+        cos_tilt = float(np.clip(R[2, 2], 0.15, 1.0))  # body z dot world z
+        thrust = float(np.clip(Fz_world_des / cos_tilt, 0.0, 3.0 * float(self.hover_thrust)))
 
+        # --- safety ---
         if not np.isfinite(thrust):
             thrust = float(self.hover_thrust)
         if not np.all(np.isfinite(tau)):
             tau = np.zeros(3, dtype=np.float32)
 
+        # --- apply in BODY frame ---
         p.applyExternalForce(self.drone_ids[drone_idx], -1, [0.0, 0.0, thrust], [0.0, 0.0, 0.0], p.LINK_FRAME)
         p.applyExternalTorque(self.drone_ids[drone_idx], -1, tau.tolist(), p.LINK_FRAME)
-
         
     def _compute_rewards(self, obs_all: np.ndarray):
         """
-        Pure reward: no physics queries. Assumes self.collision_happened was set in step().
-        Math-centric shaping; robust via Huber on formation errors.
+        Reward shaping.
         """
         leader_target = self.leader_trajectory(self.leader_traj_t)
 
-        positions  = np.array([obs_all[i, 0:3] for i in range(self.num_drones)], dtype=np.float32)
-        velocities = np.array([obs_all[i, 3:6] for i in range(self.num_drones)], dtype=np.float32)
+        # obs layout per drone:
+        # pos(0:3), vel(3:6), euler(6:9), ang_vel(9:12), ...
+        positions  = obs_all[:, 0:3].astype(np.float32, copy=False)
+        velocities = obs_all[:, 3:6].astype(np.float32, copy=False)
+        eulers     = obs_all[:, 6:9].astype(np.float32, copy=False)
+        ang_vels   = obs_all[:, 9:12].astype(np.float32, copy=False)
 
         desired_positions = np.array(
             [leader_target + self.formation_offsets.get(i, np.zeros(3, dtype=np.float32))
@@ -902,41 +1069,54 @@ class MultiDroneQuadEnv(gym.Env):
             dtype=np.float32,
         )
 
-        slot_vec  = positions - desired_positions
-        slot_err  = np.linalg.norm(slot_vec, axis=1)
-        h_slot    = self._huber(slot_err, float(self.huber_delta))
+        slot_vec = positions - desired_positions
+        slot_err = np.linalg.norm(slot_vec, axis=1)
+        h_slot   = self._huber(slot_err, float(self.huber_delta))
 
         mean_form_err = float(np.mean(slot_err))
         max_form_err  = float(np.max(slot_err))
         form_var      = float(np.var(slot_err))
 
-        z_errs = np.abs(positions[:, 2] - float(self.target_z))
-        speeds = np.linalg.norm(velocities, axis=1)
+        z_errs  = np.abs(positions[:, 2] - float(self.target_z))
+        speeds  = np.linalg.norm(velocities, axis=1)
+        omegas  = np.linalg.norm(ang_vels, axis=1)
 
+        # ---- separation penalty (align with physical min_sep to avoid "unpenalized repulsion") ----
         sep_pen = 0.0
+        min_pair_dist = float("inf")
         if self.num_drones > 1:
-            sr = float(self.sep_radius)
+            sr_cfg = float(getattr(self, "sep_radius", 0.35))
+            sr = max(sr_cfg, float(getattr(self, "min_sep", sr_cfg)))
             viol = []
             for i in range(self.num_drones):
                 pi = positions[i]
                 for j in range(i + 1, self.num_drones):
                     d = float(np.linalg.norm(pi - positions[j]))
+                    if d < min_pair_dist:
+                        min_pair_dist = d
                     if d < sr:
                         viol.append(sr - d)
             if viol:
                 sep_pen = -float(self.sep_gain) * float(np.mean(viol))
 
+        # ---- static clearance penalty (reward-level only) ----
         static_pen = 0.0
+        min_static_dist = float("inf")
         if self.obstacle_ids:
             inv_d = []
             for oid in self.obstacle_ids:
                 opos, _ = p.getBasePositionAndOrientation(oid)
                 opos = np.array(opos, dtype=np.float32)
                 d_all = np.linalg.norm(positions - opos[None, :], axis=1)
+                if d_all.size:
+                    d_min = float(np.min(d_all))
+                    if d_min < min_static_dist:
+                        min_static_dist = d_min
                 d_clamped = np.clip(d_all, 0.2, 2.0)
                 inv_d.append(np.mean(1.0 / d_clamped))
             static_pen = -float(self.static_clear_gain) * float(np.mean(inv_d))
 
+        # --- dynamic obstacle shaping ---
         r_evade = 0.0
         r_safe  = 0.0
         threat  = False
@@ -964,79 +1144,151 @@ class MultiDroneQuadEnv(gym.Env):
             if (mean_form_err < 0.5) and (min_dyn_dist > float(self.safe_radius)):
                 r_safe = float(self.safe_bonus)
 
+        # ---- core shaping terms ----
         r_form     = -float(self.form_w_mean) * float(np.mean(h_slot)) \
                     -float(self.form_w_max)  * max_form_err
         r_form_var = -float(self.form_var_gain) * form_var
-        r_height   = -float(self.alt_w)             * float(np.mean(z_errs))
-        r_smooth   = -float(self.speed_smooth_gain) * float(np.mean(speeds))
-        
-        eulers = np.array(
-            [self._get_state(i)[2] for i in range(self.num_drones)],
-            dtype=np.float32
-        )
-        roll_pitch = np.abs(eulers[:, :2])  # |roll|, |pitch|
+        r_height   = -float(self.alt_w) * float(np.mean(z_errs))
+        r_speed    = -float(self.speed_smooth_gain) * float(np.mean(speeds))
+
+        roll_pitch = np.abs(eulers[:, :2])
         att_err = float(np.mean(roll_pitch))
-        att_w = getattr(self, "att_w", 0.5)  # add to cfg if you like
+        att_w = float(getattr(self, "att_w", 0.5))
         r_att = -att_w * att_err
 
+        ang_vel_w = float(getattr(self, "ang_vel_w", 0.0))
+        r_ang = -ang_vel_w * float(np.mean(omegas))
+
+        # ---- action smoothness terms (cached in step) ----
+        r_act_mag = 0.0
+        r_act_rate = 0.0
+        action_mag_w  = float(getattr(self, "action_mag_w", 0.0))
+        action_rate_w = float(getattr(self, "action_rate_w", 0.0))
+
+        last_action = getattr(self, "last_action", None)
+        if last_action is not None and action_mag_w > 0.0:
+            r_act_mag = -action_mag_w * float(np.mean(np.square(last_action)))
+
+        last_dact = getattr(self, "last_action_delta", None)
+        if last_dact is not None and action_rate_w > 0.0:
+            r_act_rate = -action_rate_w * float(np.mean(np.square(last_dact)))
+
+                # ---- workspace soft leash around leader XY ----
+        wr = float(getattr(self, "workspace_radius", 2.0))
+        wg = float(getattr(self, "workspace_gain", 0.4))
+        d_xy = np.linalg.norm(positions[:, :2] - leader_target[None, :2], axis=1)
+        excess = np.clip(d_xy - wr, 0.0, None)
+        workspace_pen = -wg * float(np.mean(excess))
+
+        # ---- terminations & per-step incentives ----
+        alive_bonus = float(getattr(self, "alive_bonus", 0.0))
+        r_alive = alive_bonus if not self.collision_happened else 0.0
+
+        formation_break_mean = float(getattr(self, "formation_break_mean", 2.0))
+        formation_break_max  = float(getattr(self, "formation_break_max", 3.0))
+        formation_break = bool((mean_form_err > formation_break_mean) or (max_form_err > formation_break_max))
+
+        # NOTE: collision_penalty remains here, but we will set it ~0 in the config
+        collision_penalty = -float(getattr(self, "collision_penalty",
+                                        getattr(self, "collision_penalty_val", 8.0))) \
+                            if self.collision_happened else 0.0
+
+        formation_break_penalty = -float(getattr(self, "formation_break_penalty", 0.0)) \
+                                if (formation_break and (not self.collision_happened)) else 0.0
+
+        # threat scaling
         if threat:
             g = float(self.form_under_threat_gain)
             r_form     *= g
             r_form_var *= g
         
-        wr = float(getattr(self, "workspace_radius", 2.0))
-        wg = float(getattr(self, "workspace_gain", 0.4))
+                # ---- STL-style constraint margins (for blended reward) ----
+        stl_margin = 0.0
+        if getattr(self, "use_stl_reward", False):
+            # Spec limits 
+            form_limit   = float(getattr(self, "stl_form_limit", 0.8))  # max formation error
+            sep_limit    = float(getattr(self, "stl_sep_limit", 0.6))   # min inter-drone distance
+            obs_limit    = float(getattr(self, "stl_obs_limit", 1.0))   # min static obstacle clearance
+            threat_limit = float(getattr(self, "stl_threat_limit", 1.0))# min threat distance
 
-        d_xy = np.linalg.norm(positions[:, :2] - leader_target[None, :2], axis=1)
-        excess = np.clip(d_xy - wr, 0.0, None)
-        workspace_pen = -wg * float(np.mean(excess))
+            # Current constraint values
+            e_max = max_form_err
+            d_min = min_pair_dist if np.isfinite(min_pair_dist) else float("inf")
+            o_min = min_static_dist if np.isfinite(min_static_dist) else float("inf")
+            t_min = min_dyn_dist if np.isfinite(min_dyn_dist) else float("inf")
 
+            # Normalized margins: >0 = safely satisfied, 0 = on boundary, <0 = violated
+            def _norm(numer, denom):
+                return numer / max(denom, 1e-6)
 
+            m_form   = _norm(form_limit   - e_max,   form_limit)
+            m_sep    = _norm(d_min        - sep_limit,    sep_limit)
+            m_obs    = _norm(o_min        - obs_limit,    obs_limit)
+            m_threat = _norm(t_min        - threat_limit, threat_limit)
 
-        collision_penalty = -float(getattr(self, "collision_penalty", getattr(self, "collision_penalty_val", 8.0))) \
-                            if self.collision_happened else 0.0
+            # Conjunction: worst (most negative) margin dominates
+            stl_margin = min(m_form, m_sep, m_obs, m_threat)
 
-        # team_reward = (
-        #     r_form + r_form_var + r_height + r_smooth +
-        #     r_evade + r_safe + sep_pen + static_pen + workspace_pen +
-        #     collision_penalty
-        # )
-        
+            stl_clip = float(getattr(self, "stl_reward_clip", 2.0))
+            stl_margin = float(np.clip(stl_margin, -stl_clip, stl_clip))
+
+        # --- combine into team reward ---
         raw_team_reward = (
-            r_form + r_form_var + r_height + r_smooth + r_att +
+            r_form + r_form_var + r_height + r_speed + r_att + r_ang +
+            r_act_mag + r_act_rate +
             r_evade + r_safe + sep_pen + static_pen + workspace_pen +
-            collision_penalty
+            r_alive + collision_penalty + formation_break_penalty
         )
 
-        # global reward scale to keep magnitudes moderate
-        reward_scale = 0.01
+        # Add STL margin term if enabled (blended reward)
+        if getattr(self, "use_stl_reward", False):
+            stl_w = float(getattr(self, "stl_margin_weight", 0.0))
+            raw_team_reward += stl_w * stl_margin
+
+        reward_scale = float(getattr(self, "reward_scale", 0.01))
         team_reward = reward_scale * raw_team_reward
 
         rewards = [float(team_reward)] * self.num_drones
 
 
+        rewards = [float(team_reward)] * self.num_drones
+
         self.last_metrics = {
-            "mean_form_error":  mean_form_err,
-            "max_form_error":   max_form_err,
-            "form_var":         form_var,
-            "mean_z_error":     float(np.mean(z_errs)),
-            "min_dyn_distance": min_dyn_dist,
-            "collision":        float(self.collision_happened),
-            "threat":           float(threat),
+            "mean_form_error":    mean_form_err,
+            "max_form_error":     max_form_err,
+            "form_var":           form_var,
+            "mean_z_error":       float(np.mean(z_errs)),
+            "mean_speed":         float(np.mean(speeds)),
+            "mean_omega":         float(np.mean(omegas)),
+            "min_dyn_distance":   min_dyn_dist,
+            "min_static_distance": float(min_static_dist),
+            "min_pair_distance":  float(min_pair_dist),
+            "collision":          float(bool(self.collision_happened)),
+            "formation_break":    float(formation_break),
+            "threat":             float(threat),
+            "stl_margin":         float(stl_margin) if getattr(self, "use_stl_reward", False) else 0.0,
             "r_terms": {
-                "r_form":     float(r_form),
-                "r_form_var": float(r_form_var),
-                "r_height":   float(r_height),
-                "r_smooth":   float(r_smooth),
-                "r_evade":    float(r_evade),
-                "r_safe":     float(r_safe),
+                "r_form":        float(r_form),
+                "r_form_var":    float(r_form_var),
+                "r_height":      float(r_height),
+                "r_speed":       float(r_speed),
+                "r_att":         float(r_att),
+                "r_ang":         float(r_ang),
+                "r_act_mag":     float(r_act_mag),
+                "r_act_rate":    float(r_act_rate),
+                "r_evade":       float(r_evade),
+                "r_safe":        float(r_safe),
                 "workspace_pen": float(workspace_pen),
-                "sep_pen":    float(sep_pen),
-                "static_pen": float(static_pen),
-                "collision":  float(collision_penalty),
+                "sep_pen":       float(sep_pen),
+                "static_pen":    float(static_pen),
+                "alive":         float(r_alive),
+                "collision":     float(collision_penalty),
+                "formation_break": float(formation_break_penalty),
             },
         }
+
         return rewards
+
 
 
 
@@ -1102,7 +1354,7 @@ class MultiDroneQuadEnv(gym.Env):
         if mode != "rgb_array":
             raise NotImplementedError(f"Unsupported render mode: {mode}")
 
-        # --- camera parameters (you can tweak these) ---
+
         width, height = 640, 480
 
         # Look at the leader drone if it exists; otherwise the origin

@@ -1,0 +1,111 @@
+common:
+  algo: ppo_multi
+  n_envs: 8
+  n_steps: 2048
+  n_epochs: 6
+  learning_rate: 1e-4
+  ent_coef: 5e-4
+  vf_coef: 1.0
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.2
+  target_kl: 0.02
+  max_grad_norm: 0.5
+
+  total_timesteps: 1800000
+  save_every_steps: 163840
+  eval_every_steps: 163840
+  eval_episodes: 5
+
+  resume_from_prev: true
+  log_dir: runs/ppo_multi
+
+stages:
+  - name: stage0_warm
+    leader_speed_scale: 0.0
+    spawn_in_formation: true
+    disable_dynamic: true
+
+    form_w_mean: 1.8
+    form_w_max: 0.9
+    form_var_gain: 0.35
+    alt_w: 0.9
+    huber_delta: 0.3
+
+    formation_spacing: 0.9
+    min_sep: 0.55
+    sep_radius: 0.38
+    sep_gain: 1.2
+    sep_hysteresis: 0.06
+
+    thrust_delta_scale: 0.05
+    speed_smooth_gain: 0.06
+
+    max_roll_deg: 3
+    max_pitch_deg: 3
+    max_yaw_rate_deg: 30
+
+    att_w: 1.0
+    collision_penalty: 20.0
+    tilt_terminate_deg: 45.0
+
+  - name: stage1_easy
+    leader_speed_scale: 0.3
+    spawn_in_formation: true
+    disable_dynamic: true
+
+    form_w_mean: 1.8
+    form_w_max: 0.9
+    form_var_gain: 0.35
+    alt_w: 0.9
+    huber_delta: 0.3
+
+    formation_spacing: 0.9
+    min_sep: 0.55
+    sep_radius: 0.38
+    sep_gain: 1.2
+    sep_hysteresis: 0.06
+
+    thrust_delta_scale: 0.05
+    speed_smooth_gain: 0.06
+
+    max_roll_deg: 5
+    max_pitch_deg: 5
+    max_yaw_rate_deg: 45
+
+    att_w: 1.0
+    collision_penalty: 20.0
+    tilt_terminate_deg: 45.0
+
+  - name: stage2_threat_easy_tuned
+    leader_speed_scale: 0.3
+    spawn_in_formation: true
+    disable_dynamic: false
+    dynamic_aggression: 0.3
+    chase_mode: nearest
+
+    form_w_mean: 2.2
+    form_w_max: 1.2
+    form_var_gain: 0.35
+    alt_w: 1.2
+    huber_delta: 0.3
+
+    formation_spacing: 0.9
+    min_sep: 0.55
+    sep_radius: 0.38
+    sep_gain: 1.2
+    sep_hysteresis: 0.06
+
+    thrust_delta_scale: 0.05
+    speed_smooth_gain: 0.06
+
+    max_roll_deg: 5
+    max_pitch_deg: 5
+    max_yaw_rate_deg: 45
+
+    att_w: 1.0
+    collision_penalty: 20.0
+
+    workspace_radius: 2.0
+    workspace_gain: 0.4
+    tilt_terminate_deg: 45.0

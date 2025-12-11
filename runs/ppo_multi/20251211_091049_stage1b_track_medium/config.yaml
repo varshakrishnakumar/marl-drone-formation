@@ -1,0 +1,68 @@
+batch_size: 4096
+clip_range: 0.2
+computed_total_rollout: 16384
+device: cpu
+disable_dynamic: true
+ent_coef: 0.0005
+eval_episodes: 5
+eval_every_steps: 163840
+eval_use_train_options: true
+gae_lambda: 0.95
+gamma: 0.995
+gui: false
+leader_speed_scale: 0.35
+learning_rate: 0.00025
+load: /Users/varshakrishnakumar/Desktop/marl-drone-formation/runs/ppo_multi/20251211_085023_stage1_track_slow/checkpoints/best_model.zip
+load_latest: false
+load_vecnorm: /Users/varshakrishnakumar/Desktop/marl-drone-formation/runs/ppo_multi/20251211_085023_stage1_track_slow/vecnormalize_final.pkl
+log_dir: runs/ppo_multi/20251211_091049_stage1b_track_medium
+max_grad_norm: 0.5
+max_steps: 2000
+n_envs: 8
+n_epochs: 10
+n_steps: 2048
+num_drones: 5
+passthrough:
+  alive_bonus: 2.0
+  alt_w: 0.7
+  att_w: 0.9
+  collision_penalty: 2000.0
+  dynamic_repulse_gain: 0.8
+  dynamic_repulse_radius: 1.0
+  form_var_gain: 0.3
+  form_w_max: 0.4
+  form_w_mean: 2.1
+  formation_break_max: 3.0
+  formation_break_mean: 2.0
+  formation_spacing: 0.85
+  huber_delta: 0.4
+  max_pitch_deg: 7.0
+  max_roll_deg: 7.0
+  max_yaw_rate_deg: 40.0
+  min_sep: 0.56
+  obstacle_repulse_gain: 0.7
+  obstacle_repulse_radius: 0.7
+  sep_force: 0.85
+  sep_gain: 1.6
+  sep_hysteresis: 0.07
+  sep_radius: 0.62
+  speed_smooth_gain: 0.05
+  static_clear_gain: 0.3
+  stl_margin_weight: 20.0
+  terminate_on_drone_collision: true
+  thrust_delta_scale: 0.18
+  tilt_terminate_deg: 30.0
+  use_stl_reward: true
+  workspace_gain: 0.4
+  workspace_radius: 2.2
+policy_net_arch:
+- 256
+- 256
+progress_log_every: 20000
+save_every_steps: 163840
+seed: 0
+spawn_in_formation: true
+start_method: forkserver
+target_kl: 0.02
+total_timesteps: 2500000
+vf_coef: 1.0

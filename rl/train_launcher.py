@@ -18,22 +18,6 @@ def _resolve(path_like: str | Path) -> str:
     cwd_candidate = (Path.cwd() / p).resolve()
     return str(cwd_candidate if cwd_candidate.exists() else (HERE / p).resolve())
 
-def _flatten_flags(cfg: Dict[str, Any]) -> List[str]:
-    flags: List[str] = []
-    for k, v in cfg.items():
-        key = f"--{k.replace('_', '-')}"
-        if v is None:
-            continue
-        if isinstance(v, bool):
-            if v:
-                flags.append(key)
-        elif isinstance(v, (list, tuple)):
-            for item in v:
-                flags.extend([key, str(item)])
-        else:
-            flags.extend([key, str(v)])
-    return flags
-
 def _load_yaml(cfg_path: str) -> Dict[str, Any]:
     with open(cfg_path, "r") as f:
         return yaml.safe_load(f) or {}
@@ -69,6 +53,7 @@ def _flatten_flags(cfg: Dict[str, Any]) -> List[str]:
         else:
             flags.extend([key, str(v)])
     return flags
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -115,24 +100,12 @@ def main():
             log_dir = str(Path(log_dir) / f"{_timestamp()}_{stage_name}")
         scfg["log_dir"] = log_dir
 
-        if resume_from_prev and prev_log_dir:
-            scfg["load_latest"] = True
-            vecnorm_path = Path(prev_log_dir) / "vecnormalize_final.pkl"
-            ck = Path(prev_log_dir) / "checkpoints"
-            best = ck / "best_by_mfe.zip"
-            if not best.exists():
-                best = ck / "best_model.zip"
-            scfg["load"] = str(best) if best.exists() else None
-            scfg.pop("load_latest", None)
-
-            vec = Path(prev_log_dir) / "vecnormalize_final.pkl"
-            if vec.exists():
-                scfg["load_vecnorm"] = str(vec)
-
+        # Resolve any user-provided load/load_vecnorm early
         for key in ("load", "load_vecnorm"):
-            if key in scfg:
+            if key in scfg and scfg[key] is not None:
                 scfg[key] = _resolve(scfg[key])
 
+        # Allow CUDA device via YAML
         if "cuda_visible_devices" in scfg:
             env["CUDA_VISIBLE_DEVICES"] = str(scfg.pop("cuda_visible_devices"))
 
@@ -140,13 +113,13 @@ def main():
         print(f"config: {cfg_path}")
         print(f"train_script: {train_script}")
         print(f"log_dir: {log_dir}")
-        if scfg.get("load_latest", False):
-            print("resume: --load_latest (from previous stage)")
-        
+
+        # Auto-resume from previous stage if requested
         if resume_from_prev and prev_log_dir:
             ckpt_dir = Path(prev_log_dir) / "checkpoints"
-
             load_path = None
+
+            # Prefer best_by_mfe, fallback to best_model, then last ppo_multi_*_steps.zip
             for name in ("best_by_mfe.zip", "best_model.zip"):
                 p = ckpt_dir / name
                 if p.exists():
@@ -158,19 +131,19 @@ def main():
                     load_path = steps_zips[-1]
 
             if load_path:
-                scfg["load"] = str(load_path)
-                print(f"resume: --load {load_path}")
+                scfg["load"] = _resolve(load_path)
+                print(f"resume: --load {scfg['load']}")
             else:
                 print("[WARN] No checkpoint in previous stage; starting fresh.")
 
+            # Try to find vecnormalize stats from previous stage
             for v in [
                 Path(prev_log_dir) / "vecnormalize_final.pkl",
                 ckpt_dir / "vecnormalize_final.pkl",
             ]:
                 if v.exists():
-                    scfg["load_vecnorm"] = str(v)
+                    scfg["load_vecnorm"] = _resolve(v)
                     break
-
 
         if args.dry_run:
             print("[DRY RUN] Flags:", " ".join(_flatten_flags(scfg)))

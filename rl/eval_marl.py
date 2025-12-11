@@ -49,6 +49,7 @@ def parse_args():
     mex.add_argument("--zero-policy", action="store_true", help="Fly with zero actions (no model)")
     ap.add_argument("--vecnorm", type=str, default="", help="Path to vecnormalize_*.pkl")
     ap.add_argument("--formation-spacing", type=float, default=None)
+    ap.add_argument("--episodes", type=int, default=20,help="Number of episodes to run (default: 20)")
     ap.add_argument("--num-drones", type=int, default=5)
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument("--fps", type=float, default=60.0)
@@ -66,6 +67,8 @@ def parse_args():
     ap.add_argument("--forbid-collision", action="store_true",
                     help="Fail if any collision occurs in any episode.")
     ap.add_argument("--min-sep", type=float)
+    ap.add_argument("--obstacle-repulse-gain", type=float)
+    ap.add_argument("--static-clear-gain", type=float)
     ap.add_argument("--sep-hysteresis", type=float)
     ap.add_argument("--thrust-delta-scale", type=float)
     ap.add_argument("--max-roll-deg", type=float)
@@ -155,6 +158,12 @@ def main():
     if args.max_roll_deg is not None:      eval_opts["max_roll_deg"] = args.max_roll_deg
     if args.max_pitch_deg is not None:     eval_opts["max_pitch_deg"] = args.max_pitch_deg
     if args.max_yaw_rate_deg is not None:  eval_opts["max_yaw_rate_deg"] = args.max_yaw_rate_deg
+    
+    if args.obstacle_repulse_gain is not None:
+        eval_opts["obstacle_repulse_gain"] = args.obstacle_repulse_gain
+    if args.static_clear_gain is not None:
+        eval_opts["static_clear_gain"] = args.static_clear_gain
+
 
     print("[EVAL_OPTS]", eval_opts, flush=True)  
 
@@ -200,7 +209,7 @@ def main():
 
     csv_file = open(csv_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
-    header = ["step", "team_reward", "collision", "mean_form_error", "min_dyn_distance"]
+    header = ["episode", "ep_step", "global_step", "team_reward", "collision", "mean_form_error", "min_dyn_distance"]
     for i in range(args.num_drones):
         header += [f"d{i}_px", f"d{i}_py", f"d{i}_pz",
                    f"d{i}_des_x", f"d{i}_des_y", f"d{i}_des_z", f"d{i}_track_err"]
@@ -230,7 +239,8 @@ def main():
 
     try:
         step = 0
-        while step < args.steps:
+        episode_idx = 0
+        while episode_idx < args.episodes and step < args.steps:
             action, _ = predict(obs, deterministic=args.deterministic)
             obs, rewards, dones, infos = vec.step(action)
 
@@ -246,13 +256,20 @@ def main():
 
             obs_all = base_env._get_all_obs()
             desired_positions = base_env.get_desired_positions()
-
-            row = [step, reward, int(collided), mean_form_error, min_dyn_distance]
+            
+            row = [episode_idx,                     # which episode
+                len(ep_metrics["mean_form_error"]),  # step index within this episode
+                step,                             # global step across all episodes
+                reward,
+                int(collided),
+                mean_form_error,
+                min_dyn_distance]
             for i in range(args.num_drones):
                 pos = obs_all[i][0:3]; des = desired_positions[i]
                 err = float(np.linalg.norm(pos - des))
                 row.extend([pos[0], pos[1], pos[2], des[0], des[1], des[2], err])
             csv_writer.writerow(row)
+
 
             step_log.append({
                 "step": step,
@@ -302,12 +319,17 @@ def main():
                 }
                 episodes.append(epi)
                 ep_metrics = {"mean_form_error": [], "min_dyn_distance": [], "collision": []}
+                episode_idx += 1
+                if episode_idx >= args.episodes:
+                    break
+
                 obs = vec.reset()
                 base_env = unwrap_env(vec)
 
             step += 1
             if args.gui or dashboard or recorder:
                 time.sleep(dt_sec)
+
 
     except KeyboardInterrupt:
         print("\n[WARN] Interrupted; saving logs...")
