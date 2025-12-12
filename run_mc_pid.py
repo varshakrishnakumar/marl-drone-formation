@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Monte Carlo PID runner — per-episode CSV logs + IC metadata with units.
-Restores behaviors requested by Ronak:
   • Save one CSV per episode
   • Row 0 contains IC metadata (with units)
   • Rows 1..T contain time-history (same columns)
@@ -73,7 +72,7 @@ def flatten_ic(ic, num_drones):
 # Main multi-episode runner (WITH PER-EP CSVs)
 # -------------------------------------------------------------
 def run_multiple_episodes(
-    num_episodes=100,
+    num_episodes=1,
     max_steps=EPISODE_HORIZON,
     gui=False,
     summary_csv="pid_summary.csv"
@@ -168,4 +167,4 @@ def run_multiple_episodes(
 
 
 if __name__ == "__main__":
-    run_multiple_episodes(num_episodes=100, gui=False, max_steps=EPISODE_HORIZON)
+    run_multiple_episodes(num_episodes=1, gui=False, max_steps=EPISODE_HORIZON)

@@ -43,9 +43,10 @@ class MultiDroneQuadEnv(gym.Env):
         self.gui = gui
 
         if p.isConnected():
-            self.physics_client = p.getConnectionInfo()["clientIndex"]
+            self.physics_client = p.getConnectionInfo().get("physicsClientId", 0)
         else:
             self.physics_client = p.connect(p.GUI if self.gui else p.DIRECT)
+
         p.setRealTimeSimulation(0)
         self.max_steps = int(max_steps)
         self.step_count = 0
